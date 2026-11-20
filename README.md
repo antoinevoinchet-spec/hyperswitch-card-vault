@@ -13,6 +13,7 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
 
 - `README.md`: added this notice and section; reworded the overview so that it makes no compliance claim.
 - `CLAUDE.md`: added working rules for the AI coding assistant.
+- `.github/workflows/CI-pr.yml`: removed the steps that used the upstream bot's secrets to push automatic formatting and `Cargo.lock` fixes; formatting and `Cargo.lock` are now checked only, and the workflow token is read-only.
 
 ## Overview
 

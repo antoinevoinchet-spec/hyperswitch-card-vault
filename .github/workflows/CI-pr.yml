@@ -12,6 +12,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   RUSTFLAGS: "-D warnings"
 
@@ -20,24 +23,7 @@ jobs:
     name: Check formatting
     runs-on: ubuntu-latest
     steps:
-      - name: Generate a token
-        if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-        id: generate_token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.HYPERSWITCH_BOT_APP_ID }}
-          private-key: ${{ secrets.HYPERSWITCH_BOT_APP_PRIVATE_KEY }}
-
-      - name: Checkout repository with token
-        if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.ref }}
-          token: ${{ steps.generate_token.outputs.token }}
-
-      - name: Checkout repository for fork
-        if: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}
+      - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Install Rust
@@ -46,24 +32,9 @@ jobs:
           toolchain: nightly
           components: rustfmt
 
-      - name: Check formatting for forked pull requests
-        if: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}
+      - name: Check formatting
         shell: bash
         run: cargo +nightly fmt --all --check
-
-      - name: Run formatter
-        if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-        shell: bash
-        run: |
-          cargo +nightly fmt --all
-          if ! git diff --exit-code --quiet -- src; then
-            echo "::notice::Formatting check failed"
-            git config --local user.name 'hyperswitch-bot[bot]'
-            git config --local user.email '148525504+hyperswitch-bot[bot]@users.noreply.github.com'
-            git add src
-            git commit --message 'chore: run formatter'
-            git push
-          fi
 
   check-msrv:
     name: Check compilation on MSRV toolchain
@@ -107,24 +78,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Generate a token
-        if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-        id: generate_token
-        uses: actions/create-github-app-token@v3
-        with:
-          client-id: ${{ secrets.HYPERSWITCH_BOT_APP_ID }}
-          private-key: ${{ secrets.HYPERSWITCH_BOT_APP_PRIVATE_KEY }}
-
-      - name: Checkout repository with token
-        if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-        uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
-          ref: ${{ github.event.pull_request.head.ref }}
-          token: ${{ steps.generate_token.outputs.token }}
-
-      - name: Checkout repository for fork
-        if: ${{ github.event.pull_request.head.repo.full_name != github.event.pull_request.base.repo.full_name }}
+      - name: Checkout repository
         uses: actions/checkout@v7
 
       - name: Install mold linker
@@ -157,16 +111,13 @@ jobs:
         shell: bash
         run: cargo clippy --all-features --all-targets
 
-      - name: Check Cargo.lock changed
-        if: ${{ (github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name) }}
+      - name: Check Cargo.lock unchanged
         shell: bash
         run: |
           if ! git diff --quiet --exit-code -- Cargo.lock ; then
-            git config --local user.name 'hyperswitch-bot[bot]'
-            git config --local user.email '148525504+hyperswitch-bot[bot]@users.noreply.github.com'
-            git add Cargo.lock
-            git commit --message 'chore: update Cargo.lock'
-            git push
+            echo "::error::Cargo.lock is out of date; run cargo build locally and commit the updated Cargo.lock"
+            git diff -- Cargo.lock
+            exit 1
           fi
 
       - name: Cargo hack
