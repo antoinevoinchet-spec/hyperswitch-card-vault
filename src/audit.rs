@@ -288,6 +288,54 @@ pub fn fingerprint_audit(tenant_id: &str, request_id: Option<String>) -> Pending
     PendingAudit::new(tenant_id, request_id, AuditOperation::Fingerprint)
 }
 
+/// Entry for `/api/v2/vault/add`.
+pub fn store_data_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::routes_v2::data::types::StoreDataRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::VaultAdd)
+        .merchant(&request.entity_id)
+        .resource(&request.vault_id)
+}
+
+/// Entry for `/api/v2/vault/retrieve`.
+pub fn retrieve_data_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::routes_v2::data::types::RetrieveDataRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::VaultRetrieve)
+        .merchant(&request.entity_id)
+        .resource(&request.vault_id)
+}
+
+/// Entry for `/api/v2/vault/delete`.
+pub fn delete_data_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::routes_v2::data::types::DeleteDataRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::VaultDelete)
+        .merchant(&request.entity_id)
+        .resource(&request.vault_id)
+}
+
+/// Entry for `/entity`.
+pub fn entity_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::entity::CreateEntityRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::EntityCreate)
+        .merchant(&request.entity_id)
+}
+
+/// Entry for `/key/transfer`. The request only holds a batch size, so no identifier is kept.
+pub fn key_transfer_audit(tenant_id: &str, request_id: Option<String>) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::KeyTransfer)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -497,5 +545,28 @@ mod tests {
             assert!(!debug.contains(secret));
         }
         assert_eq!(entry.operation, "fingerprint");
+    }
+
+    #[test]
+    fn store_data_entry_never_contains_payload() {
+        let request: crate::routes::routes_v2::data::types::StoreDataRequest =
+            serde_json::from_value(serde_json::json!({
+                "entity_id": "entity_abc",
+                "vault_id": "vault_123",
+                "data": { "card_number": "4111111111111111" },
+                "ttl": null
+            }))
+            .unwrap();
+
+        let entry = store_data_audit("public", None, &request)
+            .finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let debug = format!("{entry:?}");
+        assert!(!json.contains("4111111111111111"));
+        assert!(!debug.contains("4111111111111111"));
+        assert!(json.contains("vault_123"));
+        assert_eq!(entry.operation, "vault_add");
+        assert_eq!(entry.merchant_id.as_deref(), Some("entity_abc"));
     }
 }

@@ -1,12 +1,16 @@
 pub mod types;
 
+use std::sync::Arc;
+
 use axum::{Json, extract::Query};
 use error_stack::ResultExt;
 use hyperswitch_masking::PeekInterface;
 
 use crate::{
+    app::TenantAppState,
+    audit,
     crypto::keymanager,
-    custom_extractors::TenantStateResolver,
+    custom_extractors::{AuditRequestId, TenantStateResolver},
     error::{self, ContainerError, ResultContainerExt},
     logger,
     observability::metrics,
@@ -18,7 +22,18 @@ use crate::{
 #[tracing::instrument(skip_all)]
 pub async fn delete_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::DeleteDataRequest>,
+) -> Result<Json<types::DeleteDataResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::delete_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = delete_data_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+#[tracing::instrument(skip_all)]
+async fn delete_data_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: types::DeleteDataRequest,
 ) -> Result<Json<types::DeleteDataResponse>, ContainerError<error::ApiError>> {
     let _entity = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.entity_id.clone())
@@ -45,7 +60,18 @@ pub async fn delete_data(
 #[tracing::instrument(skip_all)]
 pub async fn retrieve_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::RetrieveDataRequest>,
+) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::retrieve_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = retrieve_data_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+#[tracing::instrument(skip_all)]
+async fn retrieve_data_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: types::RetrieveDataRequest,
 ) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.entity_id.clone())
@@ -103,8 +129,20 @@ pub async fn retrieve_data(
 #[tracing::instrument(skip_all)]
 pub async fn add_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Query(params): Query<types::StoreDataRequestQueryParams>,
     Json(request): Json<types::StoreDataRequest>,
+) -> Result<Json<types::StoreDataResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::store_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = add_data_inner(Arc::clone(&tenant_app_state), params, request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+#[tracing::instrument(skip_all)]
+async fn add_data_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    params: types::StoreDataRequestQueryParams,
+    request: types::StoreDataRequest,
 ) -> Result<Json<types::StoreDataResponse>, ContainerError<error::ApiError>> {
     request.validate()?;
 

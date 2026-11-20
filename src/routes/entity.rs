@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    app::TenantAppState,
+    audit,
     crypto::keymanager,
-    custom_extractors::TenantStateResolver,
+    custom_extractors::{AuditRequestId, TenantStateResolver},
     error::{self, ContainerError},
     logger,
     routes::data::types::Validation,
@@ -44,7 +48,17 @@ pub struct CreateEntityResponse {
 /// existing record unchanged if it already exists.
 pub async fn create_entity(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<CreateEntityRequest>,
+) -> Result<Json<CreateEntityResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::entity_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = create_entity_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+async fn create_entity_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: CreateEntityRequest,
 ) -> Result<Json<CreateEntityResponse>, ContainerError<error::ApiError>> {
     request.validate()?;
 

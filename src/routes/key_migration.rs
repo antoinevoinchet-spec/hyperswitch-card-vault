@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use axum::Json;
 use base64::Engine;
 use hyperswitch_masking::ExposeInterface;
@@ -5,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     app::TenantAppState,
+    audit,
     crypto::{
         consts::BASE64_ENGINE,
         encryption_manager::managers::aes::GcmAes256,
@@ -13,7 +16,7 @@ use crate::{
             types::{DataKeyTransferRequest, Identifier},
         },
     },
-    custom_extractors::TenantStateResolver,
+    custom_extractors::{AuditRequestId, TenantStateResolver},
     error::{self, ContainerError, ResultContainerExt},
     logger,
     storage::{
@@ -36,7 +39,18 @@ pub struct TransferKeyResponse {
 #[tracing::instrument(skip_all)]
 pub async fn transfer_keys(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<MerchantKeyTransferRequest>,
+) -> Result<Json<TransferKeyResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::key_transfer_audit(&tenant_app_state.config.tenant_id, request_id);
+    let result = transfer_keys_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+#[tracing::instrument(skip_all)]
+async fn transfer_keys_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: MerchantKeyTransferRequest,
 ) -> Result<Json<TransferKeyResponse>, ContainerError<error::ApiError>> {
     let master_encryption = GcmAes256::new(
         tenant_app_state
