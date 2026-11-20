@@ -1,20 +1,21 @@
-# CLAUDE.md : fork d'étude de hyperswitch-card-vault
+# CLAUDE.md: study fork of hyperswitch-card-vault
 
-Fork public et non officiel de `juspay/hyperswitch-card-vault`, tenu par `antoinevoinchet-spec` comme projet d'étude. Ce code n'est ni audité ni conforme, et ne doit pas servir en production.
+Public, unofficial fork of `juspay/hyperswitch-card-vault`, maintained by `antoinevoinchet-spec` as a study project. This code is neither audited nor compliant, and must not be used in production.
 
-## Règles
+## Rules
 
-- **Cryptographie** : n'en écris aucune à la main. Utilise uniquement des bibliothèques reconnues et maintenues, en priorité celles déjà présentes dans `Cargo.toml` (`ring`, `josekit`…). Couvre chaque ajout par des tests, dont au moins un cas d'erreur.
-- **Juspay** : n'écris jamais vers `juspay/*`, ni PR, ni issue, ni commentaire, ni discussion. La poussée vers le remote `upstream` est désactivée (`DISABLED`) et `gh repo set-default` pointe sur `antoinevoinchet-spec/hyperswitch-card-vault` : ne change ni l'un ni l'autre. Passe toujours `-R antoinevoinchet-spec/hyperswitch-card-vault` aux commandes `gh pr …` et `gh issue …`.
-- **Aucune affirmation de conformité** : ne décris jamais le projet comme conforme (PCI DSS, RGPD ou autre), certifié, audité ou prêt pour la production, ni dans le code, ni dans la doc, ni dans les commits, ni dans les PR.
-- **Branches** : travaille sur une branche (`feat/…`, `fix/…`, `chore/…`), jamais directement sur `main`.
-- **Clé de test** : le `master_key` présent dans `config/development.toml`, `config/docker-configuration.toml` et `config/config.example.toml` est public, puisqu'il est dans l'historique git de Juspay. Ce n'est pas un secret utilisable. Ne t'en sers que pour des tests locaux et n'affiche jamais sa valeur.
-- **`.env` suivi par git** : un fichier `.env` est versionné à la racine. Ne le lis pas et ne l'affiche pas.
-- **Licence Apache-2.0** : liste chaque fichier modifié par rapport à l'original dans `README.md`, sous « Changes from the original ».
+- **Cryptography**: never write any by hand. Use only recognised, maintained libraries, preferably those already in `Cargo.toml` (`ring`, `josekit`…). Cover every addition with tests, including at least one error case.
+- **Juspay**: never write to `juspay/*`: no PR, issue, comment or discussion. Pushing to the `upstream` remote is disabled (`DISABLED`) and `gh repo set-default` points to `antoinevoinchet-spec/hyperswitch-card-vault`: change neither. Always pass `-R antoinevoinchet-spec/hyperswitch-card-vault` to `gh pr …` and `gh issue …` commands.
+- **No compliance claim**: never describe the project as compliant (PCI DSS, GDPR or other), certified, audited or production-ready, whether in code, docs, commits or PRs.
+- **Branches**: work on a branch (`feat/…`, `fix/…`, `chore/…`), never directly on `main`.
+- **Test key**: the `master_key` in `config/development.toml`, `config/docker-configuration.toml` and `config/config.example.toml` is public, since it is in Juspay's git history. It is not a usable secret. Use it only for local tests and never print its value.
+- **`.env` tracked by git**: a `.env` file is versioned at the root. Do not read or print it.
+- **Apache-2.0 license**: list every file changed from the original in `README.md`, under "Changes from the original".
+- **Language**: write this file and the rest of the repository in English: the `typos` spell check in CI only knows English and fails on other languages.
 
-## Commandes constatées (20/11/2026, Rust 1.100.0, Mac M2 avec 8 Go)
+## Observed commands (20/11/2026, Rust 1.100.0, Mac M2 with 8 GB)
 
-- Rust est installé par Homebrew mais absent du PATH. Avant `cargo`, lance `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"`.
-- Build : `cargo build -j 4` → code de sortie 0, 9 min 20 de compilation à froid.
-- Tests : `cargo test -j 4` → code de sortie 0, 18 tests réussis, sans base PostgreSQL ni Redis.
-- La CI d'origine lance aussi `cargo nextest run --profile ci --all-features`, `cargo clippy --all-features --all-targets` et `cargo +nightly fmt --all --check`. Ces commandes n'ont pas été lancées ici : nextest et la toolchain nightly ne sont pas installés.
+- Rust is installed by Homebrew but not on the PATH. Before `cargo`, run `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"`.
+- Build: `cargo build -j 4` → exit code 0, 9 min 20 s for a cold build.
+- Tests: `cargo test -j 4` → exit code 0, 18 tests passed, without PostgreSQL or Redis.
+- The original CI also runs `cargo nextest run --profile ci --all-features`, `cargo clippy --all-features --all-targets` and `cargo +nightly fmt --all --check`. These commands were not run here: nextest and the nightly toolchain are not installed.
