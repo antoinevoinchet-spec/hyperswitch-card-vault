@@ -1,5 +1,18 @@
 # Hyperswitch Card Vault - Rust Locker
 
+> [!WARNING]
+> **Unofficial fork — study project.** This is a personal fork of [juspay/hyperswitch-card-vault](https://github.com/juspay/hyperswitch-card-vault). It is not affiliated with or endorsed by Juspay.
+> This code is not audited and not PCI DSS compliant: do not use in production, and never store real card or personal data in it.
+> Development on this fork is done with an AI coding assistant (Claude Code).
+
+## About this fork
+
+The code in this repository is modified from the original [juspay/hyperswitch-card-vault](https://github.com/juspay/hyperswitch-card-vault). It remains under the original Apache-2.0 license (see [LICENSE](./LICENSE)). Changes made in this fork are listed below.
+
+### Changes from the original
+
+- `README.md`: added this notice and section; reworded the overview so that it makes no compliance claim.
+- `CLAUDE.md`: added working rules for the AI coding assistant.
 
 ## Overview
 
@@ -7,7 +20,7 @@ The Hyperswitch Card Vault is a highly performant and a secure vault to save sen
 
 It is designed in an polymorphic manner to handle and store any type of sensitive information making it highly scalable with extensive coverage of payment methods and processors.
 
-Hyperswitch Card Vault is built with a GDPR compliant personal identifiable information (PII) storage and secure encryption algorithms to be fully compliant with PCI DSS requirements.
+Hyperswitch Card Vault stores personal identifiable information (PII) with encryption algorithms. Compliance with standards such as PCI DSS or GDPR is assessed for an audited operating organisation, not for source code; this fork makes no such claim.
 
 Here's a quick guide to [Get Started](./docs/guides/setup.md) with setting up Hyperswitch Card Vault.
 
