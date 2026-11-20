@@ -693,3 +693,29 @@ impl super::ReverseLookupInterface for Storage {
         }
     }
 }
+
+impl crate::audit::AuditInterface for Storage {
+    /// Always writes straight to PostgreSQL, never through the KV store, so an entry cannot be
+    /// lost in a Redis outage.
+    async fn insert_audit_entry(
+        &self,
+        entry: crate::audit::AuditEntry,
+    ) -> Result<(), ContainerError<error::StorageError>> {
+        let conn = self.get_conn().await?;
+        let query = diesel::insert_into(schema::audit_log::table).values(entry);
+
+        let pool = conn.pool();
+        let operation = DbOperation::Insert;
+        super::log_db_query::<schema::audit_log::table, _>(&query, operation, pool);
+
+        super::record_db_query::<schema::audit_log::table, _, _, _>(
+            query.execute_async(conn.get()),
+            operation,
+            pool,
+        )
+        .await
+        .change_error(error::StorageError::InsertError)?;
+
+        Ok(())
+    }
+}
