@@ -247,6 +247,47 @@ pub fn emit_audit_event(
     );
 }
 
+/// Entry for `/data/add` and `/cards/add`. The stored reference is added from the response.
+pub fn store_card_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::data::types::StoreCardRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::LockerAdd)
+        .merchant(&request.merchant_id)
+        .customer(&request.merchant_customer_id)
+}
+
+/// Entry for `/data/retrieve` and `/cards/retrieve`.
+pub fn retrieve_card_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::data::types::RetrieveCardRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::LockerRetrieve)
+        .merchant(&request.merchant_id)
+        .customer(&request.merchant_customer_id)
+        .resource(&request.card_reference)
+}
+
+/// Entry for `/data/delete` and `/cards/delete`.
+pub fn delete_card_audit(
+    tenant_id: &str,
+    request_id: Option<String>,
+    request: &crate::routes::data::types::DeleteCardRequest,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::LockerDelete)
+        .merchant(&request.merchant_id)
+        .customer(&request.merchant_customer_id)
+        .resource(&request.card_reference)
+}
+
+/// Entry for the fingerprint routes. It takes no request, so nothing from the payload (data,
+/// key, labels) can reach the log.
+pub fn fingerprint_audit(tenant_id: &str, request_id: Option<String>) -> PendingAudit {
+    PendingAudit::new(tenant_id, request_id, AuditOperation::Fingerprint)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -407,5 +448,54 @@ mod tests {
             .merchant("merchant_123")
             .finish(&Ok::<(), ContainerError<ApiError>>(()));
         assert_eq!(kept.merchant_id.as_deref(), Some("merchant_123"));
+    }
+
+    #[test]
+    fn store_card_entry_never_contains_card_number() {
+        let request: crate::routes::data::types::StoreCardRequest = serde_json::from_value(
+            serde_json::json!({
+                "merchant_id": "merchant_abc",
+                "merchant_customer_id": "customer_xyz",
+                "requestor_card_reference": null,
+                "card": { "card_number": "4111111111111111" },
+                "ttl": null
+            }),
+        )
+        .unwrap();
+
+        let entry = store_card_audit("public", None, &request)
+            .finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let debug = format!("{entry:?}");
+        assert!(!json.contains("4111111111111111"));
+        assert!(!debug.contains("4111111111111111"));
+        assert!(json.contains("merchant_abc"));
+        assert!(debug.contains("merchant_abc"));
+    }
+
+    #[test]
+    fn fingerprint_entry_has_no_payload() {
+        let request: crate::routes::data::types::FingerprintRequest = serde_json::from_value(
+            serde_json::json!({
+                "batch_data": [{
+                    "label": "4111111111111111",
+                    "data": "4111111111111111",
+                    "key": "secret-key-value"
+                }]
+            }),
+        )
+        .unwrap();
+        assert!(request.batch_data.is_some());
+
+        let entry = fingerprint_audit("public", None).finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        let json = serde_json::to_string(&entry).unwrap();
+        let debug = format!("{entry:?}");
+        for secret in ["4111111111111111", "secret-key-value"] {
+            assert!(!json.contains(secret));
+            assert!(!debug.contains(secret));
+        }
+        assert_eq!(entry.operation, "fingerprint");
     }
 }

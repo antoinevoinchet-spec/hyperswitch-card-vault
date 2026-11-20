@@ -91,3 +91,24 @@ impl FromRequestParts<Arc<GlobalAppState>> for OptionalFingerprintId {
         Ok(Self(fingerprint_id))
     }
 }
+
+/// The `x-request-id` header, kept for the audit log only when it is a UUID. Never rejects.
+#[derive(Debug)]
+pub struct AuditRequestId(pub Option<String>);
+
+#[async_trait]
+impl FromRequestParts<Arc<GlobalAppState>> for AuditRequestId {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        _state: &Arc<GlobalAppState>,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(crate::audit::parse_request_id(
+            parts
+                .headers
+                .get(consts::X_REQUEST_ID)
+                .and_then(|h| h.to_str().ok()),
+        )))
+    }
+}
