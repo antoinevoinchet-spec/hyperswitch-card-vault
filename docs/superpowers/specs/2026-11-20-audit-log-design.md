@@ -65,7 +65,7 @@ Each requirement is numbered so the plan can point to it.
 
   Once the handler body has run, it writes exactly one entry with the outcome. A business error
   (unknown merchant, reference not found, validation error) is recorded as a failure with its code.
-  Vérifiable par: unit tests on the audit recording function (success and failure results), and one
+  Verifiable by: unit tests on the audit recording function (success and failure results), and one
   call site per row of the table, visible in the diff.
 
 - **D2. An entry holds metadata only.** Fields, each with why it exposes no protected data:
@@ -88,7 +88,7 @@ Each requirement is numbered so the plan can point to it.
   custodian keys, fingerprint keys or values, fingerprint ids, batch labels, JWE bodies, headers other
   than the tenant and request ids. The entry type implements `Debug` and `Serialize` only over the
   fields above.
-  Vérifiable par: a test that builds an entry from a request containing the test card number
+  Verifiable by: a test that builds an entry from a request containing the test card number
   `4111111111111111`, serializes it to JSON and asserts that the number is absent from the output.
 
 - **D3. Fail-closed.** If writing the entry fails, the handler returns
@@ -99,25 +99,25 @@ Each requirement is numbered so the plan can point to it.
   For `/custodian/decrypt`, the entry is written with the newly built tenant state *before* that state is
   published with `set_app_state`. If the write fails, the state is dropped and the tenant stays locked,
   so the vault is never unlocked without a trace (builder's call, following decision 3).
-  Vérifiable par: a unit test with a sink that always fails: the recording function returns the error
+  Verifiable by: a unit test with a sink that always fails: the recording function returns the error
   and not the successful value.
 
 - **D4. UTC timestamps.** `created_at` comes from `utils::date_time::now()`, which is UTC.
-  Vérifiable par: code review (single call site) and a test asserting the entry timestamp lies between
+  Verifiable by: code review (single call site) and a test asserting the entry timestamp lies between
   two `now()` readings.
 
 - **D5. Append-only interface.** The sink trait (`AuditInterface`) exposes one write method,
   `insert_audit_entry`. There is no update, delete or read method in this version.
-  Vérifiable par: the trait definition in the diff.
+  Verifiable by: the trait definition in the diff.
 
 - **D6. Schema.** A new migration folder `migrations/2026-11-20-000000_create_audit_log/` creates the
   `audit_log` table (D2 columns, primary key `audit_id`, an index on `created_at`). `down.sql` drops it.
   Existing migrations are untouched. `src/storage/schema.rs` gains the matching `diesel::table!`.
-  Vérifiable par: `git diff --name-only main -- migrations` lists only the new folder.
+  Verifiable by: `git diff --name-only main -- migrations` lists only the new folder.
 
 - **D7. Direct PostgreSQL writes, also with `kv`.** The audit insert always goes to PostgreSQL through
   `Storage::get_conn()`, never through the Redis KV path, so an entry cannot be lost in a Redis outage.
-  Vérifiable par: the `AuditInterface` implementation has no `#[cfg(feature = "kv")]` branch.
+  Verifiable by: the `AuditInterface` implementation has no `#[cfg(feature = "kv")]` branch.
 
 - **D8. Operations that cannot reach the table.** Before `/custodian/decrypt` succeeds, the tenant has
   no database pool, so `/custodian/key1`, `/custodian/key2` and a failed `/custodian/decrypt` cannot be
@@ -130,24 +130,26 @@ Each requirement is numbered so the plan can point to it.
   says `success`. The middleware cannot read the decrypted identifiers, so moving the hook there is not
   worth it in this version.
   The scope "except `/health`" covers `/health`, `/health/diagnostics` and `/health/runtime-config`.
-  Vérifiable par: the three custodian call sites in the diff; the limits are written in this document.
+  Verifiable by: the three custodian call sites in the diff; the limits are written in this document.
 
 - **D9. Always on.** No configuration key is added.
-  Vérifiable par: `git diff --name-only main -- config` is empty.
+  Verifiable by: `git diff --name-only main -- config` is empty.
 
 - **D10. Quality gates.** `cargo build -j 4` and `cargo test -j 4` exit 0 with at least 21 tests
   passing. `cargo clippy --all-features --all-targets -j 4` reports no warning. CI on the PR passes,
   including `cargo hack check --each-feature --all-targets`, so new tests must also compile with each
   feature enabled on its own.
-  Vérifiable par: the command outputs and `gh pr checks`.
+  Verifiable by: the command outputs and `gh pr checks`.
 
 - **D11. License notice.** `README.md`, section "Changes from the original", names every file changed
   on the branch.
-  Vérifiable par: comparing `git diff --name-only main` with that section.
+  Verifiable by: comparing `git diff --name-only main` with that section.
 
-- **D12. No compliance claim.** No added line contains "PCI DSS compliant", "GDPR compliant",
-  "certified" or "production-ready".
-  Vérifiable par: the `grep -ciE` command of the completion criteria returns 0.
+- **D12. No compliance claim.** No added line, in code or docs, contains any of the forbidden
+  compliance phrases listed in the owner's completion criteria (see the "No compliance claim" rule in
+  `CLAUDE.md`). This document and the plan refer to them without quoting them, so the check also
+  passes on the docs.
+  Verifiable by: the owner's `grep -ciE` command on `git diff main` returns 0.
 
 ## Non-goals
 
