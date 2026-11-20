@@ -95,13 +95,15 @@ fn looks_like_card_number(value: &str) -> bool {
     sum % 10 == 0
 }
 
-/// Caller-chosen identifier, truncated to the column size and redacted if it looks like a card
+/// Caller-chosen identifier, without control characters (PostgreSQL rejects NUL, which would
+/// make the audit write fail), truncated to the column size and redacted if it looks like a card
 /// number.
 fn safe_id(value: &str) -> String {
-    if looks_like_card_number(value) {
+    let cleaned: String = value.chars().filter(|c| !c.is_control()).collect();
+    if looks_like_card_number(&cleaned) {
         REDACTED.to_string()
     } else {
-        value.chars().take(MAX_ID_LENGTH).collect()
+        cleaned.chars().take(MAX_ID_LENGTH).collect()
     }
 }
 
@@ -214,6 +216,8 @@ pub(crate) async fn record<S: AuditInterface, T>(
     let entry = pending.finish(&result);
     let operation = entry.operation.clone();
     let audit_id = entry.audit_id.clone();
+    let tenant_id = entry.tenant_id.clone();
+    let request_id = entry.request_id.clone().unwrap_or_default();
 
     match sink.insert_audit_entry(entry).await {
         Ok(()) => result,
@@ -222,6 +226,8 @@ pub(crate) async fn record<S: AuditInterface, T>(
                 audit = true,
                 operation = %operation,
                 audit_id = %audit_id,
+                tenant_id = %tenant_id,
+                request_id = %request_id,
                 "failed to write audit entry; operation response withheld"
             );
             Err(ApiError::DatabaseInsertFailed("audit_log").into())
@@ -568,5 +574,18 @@ mod tests {
         assert!(json.contains("vault_123"));
         assert_eq!(entry.operation, "vault_add");
         assert_eq!(entry.merchant_id.as_deref(), Some("entity_abc"));
+    }
+
+    #[test]
+    fn pending_strips_control_characters() {
+        let entry = PendingAudit::new("public", None, AuditOperation::LockerRetrieve)
+            .merchant("m\u{0}1")
+            .customer("c\n1")
+            .resource("r\u{7}1")
+            .finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        assert_eq!(entry.merchant_id.as_deref(), Some("m1"));
+        assert_eq!(entry.customer_id.as_deref(), Some("c1"));
+        assert_eq!(entry.resource_id.as_deref(), Some("r1"));
     }
 }
