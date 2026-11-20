@@ -87,7 +87,9 @@ Each requirement is numbered so the plan can point to it.
   Never stored: card data, the `data` payload, decrypted or encrypted content, keys, `master_key`,
   custodian keys, fingerprint keys or values, fingerprint ids, batch labels, JWE bodies, headers other
   than the tenant and request ids. The entry type implements `Debug` and `Serialize` only over the
-  fields above.
+  fields above. Merchant, customer and resource ids are chosen by the caller, so a misused field could
+  hold a card number: any id that is 13 to 19 digits once spaces and hyphens are removed, and passes the
+  Luhn checksum, is stored as `redacted` (builder's call, added after the second-opinion review).
   Verifiable by: a test that builds an entry from a request containing the test card number
   `4111111111111111`, serializes it to JSON and asserts that the number is absent from the output.
 
@@ -123,7 +125,8 @@ Each requirement is numbered so the plan can point to it.
   no database pool, so `/custodian/key1`, `/custodian/key2` and a failed `/custodian/decrypt` cannot be
   written to the table. Requests rejected before the handler runs cannot be written either: unknown
   tenant, JWE decryption failure, malformed JSON. For the custodian routes, the vault emits a
-  `tracing` event with target `audit` and the same metadata fields (operation, tenant, outcome), never
+  WARN-level `tracing` event marked with the field `audit = true` (WARN so the default log filter keeps
+  it) and the same metadata fields (operation, tenant, outcome), never
   the key. Rejections before the handler are left to the existing request logs and are listed as a
   known limit. Second known limit: with the `middleware` feature, the response is encrypted or signed
   after the handler returns. If that step fails (`ResponseMiddlewareError`, HTTP 500), the entry already
