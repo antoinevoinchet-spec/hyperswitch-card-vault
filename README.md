@@ -14,6 +14,16 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
 - `README.md`: added this notice and section; reworded the overview so that it makes no compliance claim.
 - `CLAUDE.md`: added working rules for the AI coding assistant.
 - `.github/workflows/CI-pr.yml`: removed the steps that used the upstream bot's secrets to push automatic formatting and `Cargo.lock` fixes; formatting and `Cargo.lock` are now checked only, and the workflow token is read-only.
+- Audit log (one metadata-only entry per vault operation, written to a new `audit_log` table; an operation whose entry cannot be written returns an error):
+  - `src/audit.rs`: new module with the entry types, the append-only sink trait, the fail-closed `record` function and its tests.
+  - `migrations/2026-11-20-000000_create_audit_log/up.sql` and `down.sql`: new migration creating and dropping the `audit_log` table.
+  - `src/storage/schema.rs`: added the `audit_log` table.
+  - `src/storage/db.rs`: added the PostgreSQL implementation of the audit sink.
+  - `src/storage/caching.rs` and `src/storage/caching/audit.rs`: forward audit writes through the cache layer without caching them.
+  - `src/custom_extractors.rs`: added the `AuditRequestId` extractor.
+  - `src/lib.rs`: registered the `audit` module.
+  - `src/routes/data.rs`, `src/routes/routes_v2/data.rs`, `src/routes/entity.rs`, `src/routes/key_migration.rs`, `src/routes/key_custodian.rs`: each handler records its operation.
+  - `docs/superpowers/specs/2026-11-20-audit-log-design.md` and `docs/superpowers/plans/2026-11-20-audit-log.md`: design and implementation plan.
 
 ## Overview
 
