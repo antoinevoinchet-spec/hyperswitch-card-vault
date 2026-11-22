@@ -92,7 +92,7 @@ fn looks_like_card_number(value: &str) -> bool {
         })
         .sum();
 
-    sum % 10 == 0
+    sum.is_multiple_of(10)
 }
 
 /// Caller-chosen identifier, without control characters (PostgreSQL rejects NUL, which would
