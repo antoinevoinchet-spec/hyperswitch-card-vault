@@ -25,7 +25,8 @@ pub async fn delete_data(
     AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::DeleteDataRequest>,
 ) -> Result<Json<types::DeleteDataResponse>, ContainerError<error::ApiError>> {
-    let pending = audit::delete_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let pending =
+        audit::delete_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
     let result = delete_data_inner(Arc::clone(&tenant_app_state), request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
@@ -63,7 +64,8 @@ pub async fn retrieve_data(
     AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::RetrieveDataRequest>,
 ) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
-    let pending = audit::retrieve_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let pending =
+        audit::retrieve_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
     let result = retrieve_data_inner(Arc::clone(&tenant_app_state), request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }

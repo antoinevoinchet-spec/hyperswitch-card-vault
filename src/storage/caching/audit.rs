@@ -15,7 +15,10 @@ where
         + Sync
         + Send,
 {
-    async fn insert_audit_entry(&self, entry: AuditEntry) -> Result<(), ContainerError<StorageError>> {
+    async fn insert_audit_entry(
+        &self,
+        entry: AuditEntry,
+    ) -> Result<(), ContainerError<StorageError>> {
         self.inner.insert_audit_entry(entry).await
     }
 }

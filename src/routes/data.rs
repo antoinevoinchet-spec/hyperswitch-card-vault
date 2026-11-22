@@ -94,8 +94,7 @@ pub async fn add_card(
     AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::StoreCardRequest>,
 ) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
-    let pending =
-        audit::store_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let pending = audit::store_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
     let result = add_card_inner(Arc::clone(&tenant_app_state), request).await;
     let pending = match &result {
         Ok(Json(types::StoreCardResponse {

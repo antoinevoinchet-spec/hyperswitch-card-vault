@@ -202,8 +202,10 @@ impl PendingAudit {
 
 /// Destination of audit entries. Append-only: there is no update, delete or read method.
 pub(crate) trait AuditInterface {
-    async fn insert_audit_entry(&self, entry: AuditEntry)
-    -> Result<(), ContainerError<StorageError>>;
+    async fn insert_audit_entry(
+        &self,
+        entry: AuditEntry,
+    ) -> Result<(), ContainerError<StorageError>>;
 }
 
 /// Writes the audit entry for `result`, then returns `result`. If the entry cannot be written,
@@ -413,7 +415,8 @@ mod tests {
         let sink = MemorySink::default();
         let pending = PendingAudit::new("public", None, AuditOperation::VaultRetrieve);
 
-        let result: Result<(), _> = record(&sink, pending, Err(ApiError::NotFoundError.into())).await;
+        let result: Result<(), _> =
+            record(&sink, pending, Err(ApiError::NotFoundError.into())).await;
 
         assert!(matches!(
             result.unwrap_err().get_inner(),
@@ -496,7 +499,11 @@ mod tests {
         assert_eq!(entry.merchant_id.as_deref(), Some("redacted"));
         assert_eq!(entry.customer_id.as_deref(), Some("redacted"));
         assert_eq!(entry.resource_id.as_deref(), Some("redacted"));
-        assert!(!serde_json::to_string(&entry).unwrap().contains("4111111111111111"));
+        assert!(
+            !serde_json::to_string(&entry)
+                .unwrap()
+                .contains("4111111111111111")
+        );
 
         let kept = PendingAudit::new("public", None, AuditOperation::LockerAdd)
             .merchant("merchant_123")
@@ -506,16 +513,15 @@ mod tests {
 
     #[test]
     fn store_card_entry_never_contains_card_number() {
-        let request: crate::routes::data::types::StoreCardRequest = serde_json::from_value(
-            serde_json::json!({
+        let request: crate::routes::data::types::StoreCardRequest =
+            serde_json::from_value(serde_json::json!({
                 "merchant_id": "merchant_abc",
                 "merchant_customer_id": "customer_xyz",
                 "requestor_card_reference": null,
                 "card": { "card_number": "4111111111111111" },
                 "ttl": null
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
 
         let entry = store_card_audit("public", None, &request)
             .finish(&Ok::<(), ContainerError<ApiError>>(()));
@@ -530,19 +536,19 @@ mod tests {
 
     #[test]
     fn fingerprint_entry_has_no_payload() {
-        let request: crate::routes::data::types::FingerprintRequest = serde_json::from_value(
-            serde_json::json!({
+        let request: crate::routes::data::types::FingerprintRequest =
+            serde_json::from_value(serde_json::json!({
                 "batch_data": [{
                     "label": "4111111111111111",
                     "data": "4111111111111111",
                     "key": "secret-key-value"
                 }]
-            }),
-        )
-        .unwrap();
+            }))
+            .unwrap();
         assert!(request.batch_data.is_some());
 
-        let entry = fingerprint_audit("public", None).finish(&Ok::<(), ContainerError<ApiError>>(()));
+        let entry =
+            fingerprint_audit("public", None).finish(&Ok::<(), ContainerError<ApiError>>(()));
 
         let json = serde_json::to_string(&entry).unwrap();
         let debug = format!("{entry:?}");
