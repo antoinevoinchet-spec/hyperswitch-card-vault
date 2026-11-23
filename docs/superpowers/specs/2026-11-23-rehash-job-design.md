@@ -72,7 +72,8 @@ None of them settles where such a job should run.
   Verifiable by: the same e2e test (distinct hash ids; `legacy` row gone; `hash_table` count).
 - **D3** After the job, a new add of a card stored before I6, by the same merchant and customer,
   returns `duplication_check` = `duplicated` and stores no copy.
-  Verifiable by: the same e2e test, which first shows the duplicate is missed before the job.
+  Verifiable by: the same e2e test; the duplicate test of D11 first shows that, before the job,
+  such an add is missed.
 - **D4** Running the job again on a tenant already processed changes no `locker` or `hash_table`
   row (only its own audit row is added).
   Verifiable by: e2e test comparing snapshots of both tables before and after a second run.
@@ -88,12 +89,12 @@ None of them settles where such a job should run.
   `locker` row, written before the change, and one row per run.
   Verifiable by: e2e test reading every `audit_log` row as text and checking that none contains the
   card number, the hex of any hash, the master key or either custodian key.
-- **D7** If an audit row cannot be written, the job stops with an error and the `locker` row it was
-  about to change is unchanged.
+- **D7** If an audit row cannot be written, the job stops with an error and the row it was about
+  to change is unchanged: each row's audit entry is written before any write for that row.
   Verifiable by: e2e test that makes `audit_log` unwritable, runs the job, expects a non-zero exit
-  and unchanged `locker` rows.
-- **D8** The job never writes a card number, a hash value or a key to a log, a response body or an
-  error message. Its output holds counts and a cursor only.
+  and unchanged `locker` and `hash_table` rows.
+- **D8** The job never writes a card number, a hash value or a key to a log, its output or an
+  error message. Its output holds counts only.
   Verifiable by: e2e test checking the command's standard output and error for the card number,
   the hash values and the key values; code read: no `logger` call takes decrypted data.
 - **D9** The counts balance: rows examined = already current + moved + handled as duplicate; if
@@ -137,18 +138,19 @@ For each `locker` row L, in `id` order, from a cursor:
    The decrypted bytes live only in memory, inside `StrongSecret`, for this step.
 2. Read the hash row of L's `hash_id`. If it exists and its `data_hash` equals H: L is current;
    nothing is written.
-3. Otherwise read the hash row of H (`find_optional_by_data_hash`):
-   - none: insert it (`hash::insert_or_get`, race-safe);
-   - it exists and another `locker` row of the same merchant and customer cites it: L is a
-     duplicate, handled as W2 decides (if W2 = A and L's `hash_id` already has no hash row, L was
-     detached by an earlier run and is counted as current, so a second run writes nothing).
-4. Write L's audit row, then move L: `UPDATE locker SET hash_id = new WHERE` primary key `AND
-   hash_id = old` (the second condition makes a concurrent change visible as 0 rows).
+3. Otherwise read the hash row of H (`find_optional_by_data_hash`). If it exists and another
+   `locker` row of the same merchant and customer cites it, L is a duplicate, handled as W2
+   decides (W2 = A: if L's `hash_id` already has no hash row, L was detached by an earlier run and
+   is counted as current, so a second run writes nothing).
+4. Write L's audit row, before any write for L. Then, for a move, insert H if it is missing
+   (`hash::insert_or_get`, race-safe) and move L: `UPDATE locker SET hash_id = new WHERE` primary
+   key `AND hash_id = old` (the second condition makes a concurrent change visible as 0 rows, which
+   stops the job).
 5. Delete the old hash row only if no `locker` row cites it any more (one statement with
    `NOT EXISTS`), and drop it from the cache.
 
-Every intermediate state is one the next run handles: after step 3 an unused current hash row
-exists and step 3 reuses it; after step 4 the old row is unused and step 5 or the final clean-up
+Every intermediate state is one the next run handles: after the insert of step 4 an unused current
+hash row exists and the next run reuses it; after the move the old row is unused and step 5 or the final clean-up
 removes it. No progress is stored by the job.
 
 ### Final clean-up of the batch that reaches the end
@@ -171,10 +173,11 @@ can see), and the master key is unlocked by the same function as `/custodian/dec
 (`aes_decrypt_custodian_key`, `src/routes/key_custodian.rs:221-240`, made public). Without
 `key_custodian`, the master key comes from the configuration, as in the vault.
 
-It prints only counts (`examined`, `current`, `moved`, `duplicates`, `removed_hash_rows`) and
-exits 0 when every row is current; any error gives a non-zero exit and a message without data.
-`--max-rows` stops after that many rows (the interruption used by the tests); running the command
-again resumes. The job runs in the command's own process, so the vault never gains a route that
+It prints only counts (`examined`, `current`, `moved`, `duplicates`, `removed hash rows`,
+`complete`). Exit code 0 when every row has been processed; 2 when `--max-rows` stopped it before
+the end (the interruption used by the tests); 1 on any error, with a message that names the error
+kind only. Running the command again resumes. An internal `--batch-size` option (default 100)
+lets the tests cross batch boundaries with a few rows. The job runs in the command's own process, so the vault never gains a route that
 decrypts every card.
 
 ### Running next to a live vault
@@ -207,9 +210,10 @@ and `PendingAudit`, so ids are cleaned and card-shaped ids redacted as elsewhere
 `src/domain/hash.rs` (job), `src/storage.rs`,
 `src/storage/db.rs`, `src/storage/caching/hash_table.rs` (and the locker cache file if one forwards
 the trait), `src/audit.rs` (operations), `tests/vault_e2e.rs`, `docs/threat-model.md`,
-`docs/tokenization.md`, `README.md`, this design and its plan. Possibly `src/routes/data/types.rs`
-or `transformers.rs` if rebuilding the request data from `StoredData` needs a helper there: outside
-the modifiable list, asked before any change.
+`docs/tokenization.md`, `README.md`, this design and its plan. Outside the owner's
+modifiable list, asked before any change: `src/routes/key_custodian.rs` and `src/routes/data.rs`,
+one visibility change each (`aes_decrypt_custodian_key` public; `mod transformers` visible inside
+the crate, so the job reuses `get_hash` instead of copying how the hashed bytes are built).
 
 ## Table changes planned (`docs/threat-model.md`)
 
