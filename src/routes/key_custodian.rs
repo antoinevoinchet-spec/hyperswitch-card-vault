@@ -6,9 +6,10 @@ use hyperswitch_masking::{ExposeInterface, Secret};
 
 use crate::{
     app::TenantAppState,
+    audit,
     config::TenantConfig,
     crypto::encryption_manager::{encryption_interface::Encryption, managers::aes::GcmAes256},
-    custom_extractors::TenantId,
+    custom_extractors::{AuditRequestId, TenantId},
     error::{self, ResultContainerExt},
     logger,
     tenant::GlobalAppState,
@@ -65,6 +66,7 @@ pub fn serve() -> axum::Router<Arc<GlobalAppState>> {
 pub async fn key1(
     State(global_app_state): State<Arc<GlobalAppState>>,
     TenantId(tenant_id): TenantId,
+    AuditRequestId(request_id): AuditRequestId,
     Json(payload): Json<CustodianReqPayload>,
 ) -> Json<CustodianRespPayload> {
     let mut key_state = global_app_state.tenants_key_state.write().await;
@@ -73,6 +75,12 @@ pub async fn key1(
         .and_modify(|key_state_data| key_state_data.key1 = Some(payload.key));
 
     logger::info!("Received key1");
+    audit::emit_audit_event(
+        audit::AuditOperation::CustodianKey1,
+        &tenant_id,
+        request_id.as_deref(),
+        true,
+    );
     Json(CustodianRespPayload {
         message: "Received Key1".into(),
     })
@@ -83,6 +91,7 @@ pub async fn key1(
 pub async fn key2(
     State(global_app_state): State<Arc<GlobalAppState>>,
     TenantId(tenant_id): TenantId,
+    AuditRequestId(request_id): AuditRequestId,
     Json(payload): Json<CustodianReqPayload>,
 ) -> Json<CustodianRespPayload> {
     let mut key_state = global_app_state.tenants_key_state.write().await;
@@ -91,6 +100,12 @@ pub async fn key2(
         .and_modify(|key_state_data| key_state_data.key2 = Some(payload.key));
 
     logger::info!("Received key2");
+    audit::emit_audit_event(
+        audit::AuditOperation::CustodianKey2,
+        &tenant_id,
+        request_id.as_deref(),
+        true,
+    );
     Json(CustodianRespPayload {
         message: "Received Key2".into(),
     })
@@ -101,6 +116,24 @@ pub async fn key2(
 pub async fn decrypt(
     State(global_app_state): State<Arc<GlobalAppState>>,
     TenantId(tenant_id): TenantId,
+    AuditRequestId(request_id): AuditRequestId,
+) -> Result<Json<CustodianRespPayload>, error::ContainerError<error::ApiError>> {
+    let result = decrypt_inner(global_app_state, &tenant_id, request_id.clone()).await;
+    if result.is_err() {
+        audit::emit_audit_event(
+            audit::AuditOperation::CustodianDecrypt,
+            &tenant_id,
+            request_id.as_deref(),
+            false,
+        );
+    }
+    result
+}
+
+async fn decrypt_inner(
+    global_app_state: Arc<GlobalAppState>,
+    tenant_id: &str,
+    request_id: Option<String>,
 ) -> Result<Json<CustodianRespPayload>, error::ContainerError<error::ApiError>> {
     let mut key_state_map = global_app_state.tenants_key_state.write().await;
     let key_state_for_tenant = key_state_map
@@ -131,6 +164,19 @@ pub async fn decrypt(
             .change_context(error::ApiError::TenantError(
                 "Failed while creating AppState for tenant",
             ))?;
+
+            // The audit entry is written before the tenant is published: if it cannot be
+            // written, the tenant stays locked.
+            audit::record(
+                &tenant_app_state.db,
+                audit::PendingAudit::new(
+                    tenant_id,
+                    request_id,
+                    audit::AuditOperation::CustodianDecrypt,
+                ),
+                Ok(()),
+            )
+            .await?;
 
             global_app_state.set_app_state(tenant_app_state).await;
 

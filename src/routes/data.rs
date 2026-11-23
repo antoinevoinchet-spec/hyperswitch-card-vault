@@ -11,8 +11,10 @@ use hyperswitch_masking::Secret;
 
 use self::types::Validation;
 use crate::{
+    app::TenantAppState,
+    audit,
     crypto::{hash_manager::managers::sha::Sha512, keymanager},
-    custom_extractors::{OptionalFingerprintId, TenantStateResolver},
+    custom_extractors::{AuditRequestId, OptionalFingerprintId, TenantStateResolver},
     domain::{fingerprint, hash},
     error::{self, ContainerError, ResultContainerExt},
     logger,
@@ -89,7 +91,24 @@ pub fn serve(
 #[tracing::instrument(skip_all)]
 pub async fn add_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::StoreCardRequest>,
+) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::store_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = add_card_inner(Arc::clone(&tenant_app_state), request).await;
+    let pending = match &result {
+        Ok(Json(types::StoreCardResponse {
+            payload: Some(payload),
+            ..
+        })) => pending.resource(&payload.card_reference),
+        _ => pending,
+    };
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+async fn add_card_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: types::StoreCardRequest,
 ) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
     request.validate()?;
 
@@ -171,7 +190,18 @@ pub async fn add_card(
 #[tracing::instrument(skip_all)]
 pub async fn delete_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::DeleteCardRequest>,
+) -> Result<Json<types::DeleteCardResponse>, ContainerError<error::ApiError>> {
+    let pending =
+        audit::delete_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = delete_card_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+async fn delete_card_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: types::DeleteCardRequest,
 ) -> Result<Json<types::DeleteCardResponse>, ContainerError<error::ApiError>> {
     let _entity = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.merchant_id.clone())
@@ -198,7 +228,18 @@ pub async fn delete_card(
 #[tracing::instrument(skip_all)]
 pub async fn retrieve_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     Json(request): Json<types::RetrieveCardRequest>,
+) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
+    let pending =
+        audit::retrieve_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
+    let result = retrieve_card_inner(Arc::clone(&tenant_app_state), request).await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+async fn retrieve_card_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    request: types::RetrieveCardRequest,
 ) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.merchant_id.clone())
@@ -262,8 +303,21 @@ pub async fn retrieve_card(
 #[tracing::instrument(skip_all)]
 pub async fn get_or_insert_fingerprint(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
+    AuditRequestId(request_id): AuditRequestId,
     OptionalFingerprintId(fingerprint_id): OptionalFingerprintId,
     Json(request): Json<types::FingerprintRequest>,
+) -> Result<Json<types::FingerprintResponse>, ContainerError<error::ApiError>> {
+    let pending = audit::fingerprint_audit(&tenant_app_state.config.tenant_id, request_id);
+    let result =
+        get_or_insert_fingerprint_inner(Arc::clone(&tenant_app_state), fingerprint_id, request)
+            .await;
+    audit::record(&tenant_app_state.db, pending, result).await
+}
+
+async fn get_or_insert_fingerprint_inner(
+    tenant_app_state: Arc<TenantAppState>,
+    fingerprint_id: Option<Secret<String>>,
+    request: types::FingerprintRequest,
 ) -> Result<Json<types::FingerprintResponse>, ContainerError<error::ApiError>> {
     let response: types::FingerprintResponse = match types::FingerprintMode::try_from(request)? {
         types::FingerprintMode::Single { data, key } => {

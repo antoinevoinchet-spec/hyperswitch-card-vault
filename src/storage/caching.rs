@@ -260,6 +260,7 @@ where
     }
 }
 
+pub mod audit;
 #[cfg(feature = "external_key_manager")]
 pub mod entity;
 pub mod fingerprint;

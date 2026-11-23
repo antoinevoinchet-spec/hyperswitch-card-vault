@@ -1,6 +1,31 @@
 // @generated automatically by Diesel CLI.
 
 diesel::table! {
+    audit_log (audit_id) {
+        #[max_length = 64]
+        audit_id -> Varchar,
+        created_at -> Timestamp,
+        #[max_length = 64]
+        request_id -> Nullable<Varchar>,
+        #[max_length = 64]
+        tenant_id -> Varchar,
+        #[max_length = 32]
+        operation -> Varchar,
+        #[max_length = 255]
+        merchant_id -> Nullable<Varchar>,
+        #[max_length = 255]
+        customer_id -> Nullable<Varchar>,
+        #[max_length = 255]
+        resource_id -> Nullable<Varchar>,
+        #[max_length = 16]
+        outcome -> Varchar,
+        status_code -> Int2,
+        #[max_length = 64]
+        error_type -> Nullable<Varchar>,
+    }
+}
+
+diesel::table! {
     entity (entity_id) {
         id -> Int4,
         #[max_length = 255]
@@ -90,6 +115,7 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
+    audit_log,
     entity,
     fingerprint,
     hash_table,
