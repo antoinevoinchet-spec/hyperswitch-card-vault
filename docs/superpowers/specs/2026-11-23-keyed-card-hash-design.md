@@ -118,6 +118,12 @@ Rows written before this change hold plain SHA-512 values. After it, no lookup c
   that decrypts each `locker` row, recomputes the keyed hash, rewrites `hash_table` and then deletes
   the plain values; that job is out of scope and is described in `docs/tokenization.md`.
 
+## Note found in review
+
+With the `external_key_manager` feature enabled, `tenant_secrets.master_key` no longer encrypts the
+cards (`src/crypto/keymanager.rs:59-67`) but is still required and still feeds this derivation. It
+must therefore stay a real secret in that mode too; `docs/tokenization.md` says so.
+
 ## Decisions for the owner
 
 - **I3** source of the secret: **the tenant master key** (owner, 2026-11-23). No new configuration,

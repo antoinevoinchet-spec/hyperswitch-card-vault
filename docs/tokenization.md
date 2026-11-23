@@ -89,8 +89,8 @@ read on 2026-11-23). Page numbers below refer to that document.
   (`src/crypto/hash_manager/managers/sha.rs:120-122`), 64 bytes, not truncated.
 - Its key is derived with HKDF-SHA512 from the tenant master key and the context
   `hyperswitch-card-vault/card-dedup/v1` (`src/crypto/hash_manager/managers/sha.rs:82` and
-  `:93-108`), so it is independent of the keys that encrypt the cards, and two tenants never share
-  it. Under the `key_custodian` feature, the vault cannot compute it before both custodians have
+  `:93-108`), so it is independent of the keys that encrypt the cards, and two tenants with
+  different master keys get different keys. Under the `key_custodian` feature, the vault cannot compute it before both custodians have
   unlocked the master key.
 - Someone who reads `hash_table` alone can no longer test candidate card numbers against it: they
   would need the master key. Tests: `card_dedup_two_master_keys_give_two_hashes` and
@@ -119,6 +119,11 @@ read on 2026-11-23). Page numbers below refer to that document.
   are deleted. This fork holds no real card, so no migration is provided; a real deployment would
   need a one-off job that decrypts each stored card, recomputes the keyed hash and deletes the old
   values.
+- **The master key must stay a real secret even with an external key manager.** With the
+  `external_key_manager` feature enabled, the cards are encrypted by the external service
+  (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it
+  is still required (`src/config.rs:143`) and the duplicate-check key is still derived from it. A
+  placeholder or public value there would make the duplicate-check hash computable by anyone again.
 - **A change of master key would change every duplicate-check hash**, since the key is derived from
   it. The design (`docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md`, decision I3)
   describes how to keep the current key in that case. Key rotation is not implemented.
