@@ -17,6 +17,11 @@ use std::{
 use diesel::{
     Connection, PgConnection, QueryableByName, RunQueryDsl, connection::SimpleConnection,
 };
+use hyperswitch_card_vault::crypto::{
+    encryption_manager::{encryption_interface::Encryption, managers::aes::GcmAes256},
+    hash_manager::{hash_interface::Encode, managers::sha::CardDedupHmac},
+};
+use hyperswitch_masking::Secret;
 
 const CARD_NUMBER: &str = "4111111111111111";
 const MERCHANT: &str = "demo-merchant";
@@ -522,8 +527,24 @@ async fn stored_card_hash_is_not_a_plain_sha512() {
         "stored hash is the plain SHA-512 of the card number"
     );
     // The bytes the unkeyed version hashed: the JSON-serialised number, between double quotes.
+    let hashed_bytes = format!("\"{CARD_NUMBER}\"");
     assert!(
-        *stored != sha512(format!("\"{CARD_NUMBER}\"").as_bytes()),
+        *stored != sha512(hashed_bytes.as_bytes()),
         "stored hash is the plain SHA-512 of the JSON-serialised card number"
+    );
+
+    // Recompute the expected keyed hash: unlock the master key as the custodians do (AES-GCM under
+    // key 1 + key 2), then HMAC under the derived key. Values stay in memory and are never printed.
+    let custodian_key = hex::decode(format!("{}{}", keys.key1, keys.key2)).expect("custodian key");
+    let master_key = GcmAes256::new(custodian_key)
+        .decrypt(hex::decode(&keys.master_key).expect("encrypted master key"))
+        .expect("decrypt master key");
+    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key))
+        .expect("derive dedup key")
+        .encode(hashed_bytes.into_bytes())
+        .expect("keyed hash");
+    assert!(
+        *stored == expected,
+        "stored hash is not the HMAC-SHA512 under the derived key"
     );
 }

@@ -150,6 +150,12 @@ mod tests {
         let first = hash(&enc);
         assert_eq!(first.len(), 64);
         assert_eq!(first, hash(&enc));
+        // get_hash hashes the JSON-serialised string with the algorithm it is given.
+        let expected = CardDedupHmac::from_master_key(&key)
+            .unwrap()
+            .encode(serde_json::to_vec("4111111111111111").unwrap())
+            .unwrap();
+        assert!(first == expected, "get_hash did not use the keyed hash");
         // Both branches hash the same JSON string here, so they meet on purpose: the input bytes
         // are unchanged by this fix, only the key is new.
         assert_eq!(first, hash(&card));
