@@ -49,8 +49,7 @@ read on 2026-11-23). Page numbers below refer to that document.
 - The card data is not stored in clear: it is encrypted with the merchant's key
   (`src/crypto/keymanager/internal_keymanager.rs:128-136`), and the merchant's key is itself stored
   encrypted under the tenant's master key (`src/crypto/keymanager/internal_keymanager.rs:48-55`, where the master key is loaded, and
-  `src/crypto/keymanager/internal_keymanager.rs:80-87`, where the merchant row is read through it and
-  its key used).
+  `src/crypto/keymanager/internal_keymanager.rs:61-65`, where the merchant row is read through it).
   All layers use AES-256-GCM through the existing `GcmAes256` type.
 - So the vault combines a look-up token with encrypted storage: the token has no relation to the
   card, and the vault row holding the card is encrypted.
@@ -62,8 +61,9 @@ read on 2026-11-23). Page numbers below refer to that document.
 - Given a `card_reference`, the vault finds the row and decrypts it
   (`src/routes/data.rs:258`), then returns the card.
 - Access control in this code base is per tenant: every data call must carry a known `x-tenant-id`
-  (`src/custom_extractors.rs:26`), and with the `middleware` feature every request must be encrypted
-  and signed with the tenant's key pair. There is no finer per-caller rule.
+  (`src/custom_extractors.rs:26-30`), and with the `middleware` feature every request body must be
+  a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and every response is
+  signed (`src/middleware.rs:81`). There is no finer per-caller rule.
 - Every de-tokenization leaves an audit row before the card leaves the vault, and none is returned if
   that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:237`),
   proven by `retrieve_fails_closed_when_audit_table_is_unwritable` (`tests/vault_e2e.rs`).
