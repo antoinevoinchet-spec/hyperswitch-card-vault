@@ -10,7 +10,8 @@ all-features = true
 [advisories]
 # Policy decided by the fork's owner on 2026-11-23: an entry that already affects the original
 # code at commit a8ee711 is listed below, with its reason and an expiry date of 2027-02-21. After
-# that date it fails again. Any other entry fails the check.
+# that date it fails again. Any other entry fails the check. An exception names an entry, not a
+# version: until that date, another affected version of the same crate would pass too.
 # Limit: the RustSec database describes crates.io releases. The crates taken from git (see the
 # sources section) are checked for their source and license, not for known vulnerabilities.
 unmaintained = "workspace"
