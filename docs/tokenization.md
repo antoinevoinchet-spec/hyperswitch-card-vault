@@ -93,10 +93,13 @@ read on 2026-11-23). Page numbers below refer to that document.
   `redacted` (`looks_like_card_number`, `src/audit.rs:66`; test `pending_redacts_card_shaped_ids`),
   but the vault itself stores it. As a side effect, about one in ten purely numeric ids of 13 to 19
   digits also passes the Luhn check and is redacted in the audit log (review note M1).
-- **The duplicate check keeps an unkeyed hash of the card data.** To detect a card already stored,
-  `/data/add` computes a plain SHA-512 of the request's card data (`src/routes/data.rs:116`) and
-  keeps it in `hash_table.data_hash` (`src/storage/schema.rs:51-55`). Unlike the fingerprint, this
-  hash has no key: anyone who can read that table and guesses a card number can check the guess.
+- **The duplicate check keeps an unkeyed hash of the card number.** To detect a card already
+  stored, `/data/add` computes a plain SHA-512 (`src/routes/data.rs:116`) of the card number alone
+  (`src/routes/data/transformers.rs:94-97`) and keeps it in `hash_table.data_hash`
+  (`src/storage/schema.rs:51-55`). Unlike the fingerprint, this hash has no key. A card number has
+  few unknown digits once its issuer prefix and check digit are known, so anyone who can read that
+  table can recover the numbers by trying every candidate, even though the stored cards themselves
+  are encrypted.
 - **No per-caller access rules or masking** on retrieval (a later phase of this fork may study
   them).
 - **Custodian unlock before the database role is narrowed.** Since custodian steps are recorded in
