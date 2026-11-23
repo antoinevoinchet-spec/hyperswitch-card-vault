@@ -150,6 +150,28 @@ struct Vault {
     child: Child,
     base: String,
     client: reqwest::Client,
+    log: std::path::PathBuf,
+}
+
+/// Replaces runs of 32 or more hex characters (key-shaped values) before a log line is printed.
+fn redact_hex(line: &str) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in line.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_hexdigit() {
+            run.push(c);
+            continue;
+        }
+        if run.len() >= 32 {
+            out.push_str("<hex>");
+        } else {
+            out.push_str(&run);
+        }
+        run.clear();
+        out.push(c);
+    }
+    out.pop();
+    out
 }
 
 impl Vault {
@@ -163,6 +185,8 @@ impl Vault {
         let db_port = db.url.port().unwrap_or(5432).to_string();
         let password = db.url.password().unwrap_or("unused").to_string();
 
+        let log = std::env::temp_dir().join(format!("vault_e2e_{}.log", uuid::Uuid::now_v7()));
+        let log_file = std::fs::File::create(&log).expect("create locker log");
         let child = Command::new(env!("CARGO_BIN_EXE_locker"))
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("LOCKER__SERVER__PORT", port.to_string())
@@ -172,8 +196,8 @@ impl Vault {
             .env("LOCKER__DATABASE__PASSWORD", password)
             .env("LOCKER__DATABASE__DBNAME", &db.name)
             .env("LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY", master_key)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::from(log_file.try_clone().expect("clone log handle")))
+            .stderr(Stdio::from(log_file))
             .spawn()
             .expect("start locker");
 
@@ -181,6 +205,7 @@ impl Vault {
             child,
             base: format!("http://127.0.0.1:{port}"),
             client: reqwest::Client::new(),
+            log,
         };
 
         for _ in 0..240 {
@@ -216,6 +241,19 @@ impl Drop for Vault {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        // On failure, show only the vault's error lines, with key-shaped values masked.
+        if std::thread::panicking()
+            && let Ok(content) = std::fs::read_to_string(&self.log)
+        {
+            for line in content
+                .lines()
+                .filter(|line| line.contains("ERROR"))
+                .take(20)
+            {
+                println!("locker: {}", redact_hex(line));
+            }
+        }
+        let _ = std::fs::remove_file(&self.log);
     }
 }
 
