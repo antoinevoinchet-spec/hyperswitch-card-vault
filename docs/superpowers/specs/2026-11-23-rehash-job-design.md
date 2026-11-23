@@ -85,7 +85,7 @@ None of them settles where such a job should run.
   state keyed by fixed card references.
 - **D6** The job writes `audit_log` rows with metadata only (tenant, operation, merchant, customer,
   card reference, outcome), never a card number, a hash value or a key; one row per changed
-  `locker` row, written before the change, and one row per batch.
+  `locker` row, written before the change, and one row per run.
   Verifiable by: e2e test reading every `audit_log` row as text and checking that none contains the
   card number, the hex of any hash, the master key or either custodian key.
 - **D7** If an audit row cannot be written, the job stops with an error and the `locker` row it was
@@ -197,7 +197,7 @@ vault restarts.
 
 ### Audit
 
-New operations `rehash_batch` (one row per call, its outcome) and `rehash_row` (one row per changed
+New operations `rehash_run` (one row per run of the command, its outcome) and `rehash_row` (one row per changed
 `locker` row, with merchant, customer and card reference as `resource_id`), through `audit::record`
 and `PendingAudit`, so ids are cleaned and card-shaped ids redacted as elsewhere.
 
