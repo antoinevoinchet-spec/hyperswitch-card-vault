@@ -219,13 +219,13 @@ Expected: the 6 behaviour tests FAIL (panic `not yet implemented`); the constant
   `docs/tokenization.md`, the design and this plan), design status line.
 
 - [ ] **Step 1: Update the docs** (after `cargo fmt`, so the cited `file:line` is final). Check:
-  `grep -c 'unkeyed hash' docs/tokenization.md` → 0 and `grep -rinE 'unkeyed|plain SHA-512' docs/tokenization.md`
+  `grep -c 'unkeyed hash' docs/tokenization.md` → 0 and `grep -r -i -n -E 'unkeyed|plain SHA-512' docs/tokenization.md`
   shows only text about the old behaviour or existing rows. The fate of existing rows is stated as
   "read in the code, not tested", and the page notes that a change of master key would change every
   hash (design, I3);
   every path of `git diff --name-only main` except `README.md` appears in `README.md`; the forbidden
   compliance phrases from `CLAUDE.md` do not appear in added lines:
-  `git diff main -- . ':!docs/superpowers' | grep '^+' | grep -inE 'complian|certifi|production-ready'`
+  `git diff main -- . ':!docs/superpowers' | grep '^+' | grep -inE 'compliant|compliance|certified|production-ready'`
   → nothing, then a manual read of the design and plan, of every added mention of PCI, of the commit
   messages and of the PR text.
 - [ ] **Step 2: Full verification**: `cargo build -j 4` → 0; `cargo test -j 4` → 0, baseline + 6 passed (at least 34);
