@@ -139,3 +139,61 @@ jobs:
 
       - name: Spell check
         uses: crate-ci/typos@master
+
+  integration-db:
+    name: End-to-end tests and demo against PostgreSQL
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: "postgres:alpine"
+        env:
+          POSTGRES_DB: locker
+          POSTGRES_USER: postgres
+          # Trust authentication keeps passwords out of the URLs below; the database only lives
+          # for this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@v1
+        if: ${{ runner.os == 'Linux' }}
+        with:
+          make-default: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable 2 weeks ago
+
+      - uses: Swatinem/rust-cache@v2.9.1
+
+      - name: Run end-to-end tests
+        shell: bash
+        env:
+          VAULT_TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+        run: cargo test --features key_custodian --test vault_e2e
+
+      - name: Create the demo database
+        shell: bash
+        run: psql postgres://postgres@localhost:5432/postgres -c 'CREATE DATABASE demo'
+
+      - name: Run the demo
+        shell: bash
+        env:
+          DEMO_DATABASE_URL: postgres://postgres@localhost:5432/demo
+        run: |
+          make demo | tee demo-output.txt
+          count=$(grep -c 4111111111111111 demo-output.txt || true)
+          echo "test card number lines in the demo output: ${count} (at most 3 allowed)"
+          test "${count}" -le 3
