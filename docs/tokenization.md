@@ -59,13 +59,13 @@ read on 2026-11-23). Page numbers below refer to that document.
 ### `/data/retrieve` is de-tokenization
 
 - Given a `card_reference`, the vault finds the row and decrypts it
-  (`src/routes/data.rs:258`), then returns the card.
+  (`src/routes/data.rs:262`), then returns the card.
 - Access control in this code base is per tenant: every data call must carry a known `x-tenant-id`
   (`src/custom_extractors.rs:26-30`), and with the `middleware` feature every request body must be
   a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and every response is
   signed (`src/middleware.rs:81`). There is no finer per-caller rule.
 - Every de-tokenization leaves an audit row before the card leaves the vault, and none is returned if
-  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:237`),
+  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:241`),
   proven by `retrieve_fails_closed_when_audit_table_is_unwritable` (`tests/vault_e2e.rs`).
 - The row never holds the card: `store_card_entry_never_contains_card_number` (`src/audit.rs`) and
   the demo's check "audit rows containing the card number: 0".
@@ -81,6 +81,24 @@ read on 2026-11-23). Page numbers below refer to that document.
 - The audit row for a fingerprint takes nothing from the request: `fingerprint_entry_has_no_payload`
   (`src/audit.rs`).
 
+### The duplicate check uses a keyed hash
+
+- To detect a card already stored, `/data/add` computes a hash of the card number
+  (`src/routes/data.rs:116-122`) and looks it up in `hash_table.data_hash`
+  (`src/storage/schema.rs:51-55`). That hash is one HMAC-SHA512 from `ring`
+  (`src/crypto/hash_manager/managers/sha.rs:120-122`), 64 bytes, not truncated.
+- Its key is derived with HKDF-SHA512 from the tenant master key and the context
+  `hyperswitch-card-vault/card-dedup/v1` (`src/crypto/hash_manager/managers/sha.rs:82` and
+  `:93-108`), so it is independent of the keys that encrypt the cards, and two tenants with
+  different master keys get different keys. Under the `key_custodian` feature, the vault cannot compute it before both custodians have
+  unlocked the master key.
+- Someone who reads `hash_table` alone can no longer test candidate card numbers against it: they
+  would need the master key. Tests: `card_dedup_two_master_keys_give_two_hashes` and
+  `hmac_sha512_matches_rfc4231_case_2` (`src/crypto/hash_manager/managers/sha.rs`), and, against a
+  real database, `stored_card_hash_is_not_a_plain_sha512` and
+  `same_card_for_two_merchants_shares_one_hash_row` (`tests/vault_e2e.rs`).
+- The duplicate check still spans one tenant and all its merchants, as before.
+
 ## What the vault does not do
 
 - **No format-preserving token.** The reference is a UUID, not a 16-digit value that looks like a
@@ -93,13 +111,22 @@ read on 2026-11-23). Page numbers below refer to that document.
   `redacted` (`looks_like_card_number`, `src/audit.rs:66`; test `pending_redacts_card_shaped_ids`),
   but the vault itself stores it. As a side effect, about one in ten purely numeric ids of 13 to 19
   digits also passes the Luhn check and is redacted in the audit log (review note M1).
-- **The duplicate check keeps an unkeyed hash of the card number.** To detect a card already
-  stored, `/data/add` computes a plain SHA-512 (`src/routes/data.rs:116`) of the card number alone
-  (`src/routes/data/transformers.rs:94-97`) and keeps it in `hash_table.data_hash`
-  (`src/storage/schema.rs:51-55`). Unlike the fingerprint, this hash has no key. A card number has
-  few unknown digits once its issuer prefix and check digit are known, so anyone who can read that
-  table can recover the numbers by trying every candidate, even though the stored cards themselves
-  are encrypted.
+- **Rows written before the keyed hash are not converted.** Until this fork's fix, the duplicate
+  check stored a plain SHA-512 of the card number, which anyone reading `hash_table` could reverse by
+  trying every candidate number. No lookup matches those old rows any more (read in the code, not
+  tested): a card stored before the fix and added again gets a new row, and for the same merchant and
+  customer a second stored copy, without `duplication_check`. The old values stay readable until they
+  are deleted. This fork holds no real card, so no migration is provided; a real deployment would
+  need a one-off job that decrypts each stored card, recomputes the keyed hash and deletes the old
+  values.
+- **The master key must stay a real secret even with an external key manager.** With the
+  `external_key_manager` feature enabled, the cards are encrypted by the external service
+  (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it
+  is still required (`src/config.rs:143`) and the duplicate-check key is still derived from it. A
+  placeholder or public value there would make the duplicate-check hash computable by anyone again.
+- **A change of master key would change every duplicate-check hash**, since the key is derived from
+  it. The design (`docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md`, decision I3)
+  describes how to keep the current key in that case. Key rotation is not implemented.
 - **No per-caller access rules or masking** on retrieval (a later phase of this fork may study
   them).
 - **Custodian unlock before the database role is narrowed.** Since custodian steps are recorded in

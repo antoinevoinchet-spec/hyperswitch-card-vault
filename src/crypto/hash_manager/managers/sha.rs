@@ -77,6 +77,51 @@ impl<const N: usize> Encode<Secret<Vec<u8>>, Secret<Vec<u8>>> for HmacSha512<N> 
     }
 }
 
+/// HKDF context of the duplicate-check key. It is specific to this use and versioned, so the derived
+/// key is independent of every other key taken from the tenant master key.
+pub const CARD_DEDUP_INFO: &[u8] = b"hyperswitch-card-vault/card-dedup/v1";
+
+///
+/// Keyed hash of the card data used by the `/data/add` duplicate check (`hash_table.data_hash`).
+///
+/// The key is derived with HKDF-SHA512 from the tenant master key and [`CARD_DEDUP_INFO`]; the hash
+/// is one plain HMAC-SHA512 of the input, 64 bytes, never truncated. Both come from `ring`.
+///
+pub struct CardDedupHmac(Secret<Vec<u8>>);
+
+impl CardDedupHmac {
+    pub fn from_master_key(
+        master_key: &Secret<Vec<u8>>,
+    ) -> Result<Self, error::ContainerError<error::CryptoError>> {
+        if master_key.peek().is_empty() {
+            return Err(error::CryptoError::InvalidData("empty master key").into());
+        }
+
+        let mut key = vec![0_u8; ring::hkdf::KeyType::len(&ring::hkdf::HKDF_SHA512)];
+        ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
+            .extract(master_key.peek())
+            .expand(&[CARD_DEDUP_INFO], ring::hkdf::HKDF_SHA512)
+            .and_then(|okm| okm.fill(&mut key))
+            .map_err(|_| error::CryptoError::InvalidData("card dedup key derivation failed"))?;
+
+        Ok(Self(Secret::new(key)))
+    }
+}
+
+impl Encode<Vec<u8>, Vec<u8>> for CardDedupHmac {
+    type ReturnType<T> = Result<T, error::ContainerError<error::CryptoError>>;
+
+    fn encode(&self, input: Vec<u8>) -> Self::ReturnType<Vec<u8>> {
+        Ok(hmac_sha512(self.0.peek(), &input))
+    }
+}
+
+/// One plain HMAC-SHA512 (RFC 2104), computed by `ring`.
+fn hmac_sha512(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let key = hmac::Key::new(hmac::HMAC_SHA512, key);
+    hmac::sign(&key, data).as_ref().to_vec()
+}
+
 trait AssertGt0 {
     const VALID: ();
 }
@@ -181,5 +226,112 @@ mod tests {
         let hash2 = algo2.encode(data.as_bytes().to_vec().into()).unwrap();
 
         assert_ne!(hash1, hash2);
+    }
+
+    // Duplicate-check hash. Test data: the public test card number, keys from the generator behind
+    // `utils master-key`, and RFC 4231 vectors. No key is printed on failure.
+
+    use crate::crypto::encryption_manager::managers::aes::generate_aes256_key;
+
+    const CARD: &[u8] = b"4111111111111111";
+
+    fn master_key() -> Secret<Vec<u8>> {
+        Secret::new(generate_aes256_key().to_vec())
+    }
+
+    fn sha512(data: &[u8]) -> Vec<u8> {
+        ring::digest::digest(&ring::digest::SHA512, data)
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn hmac_sha512_matches_rfc4231_case_2() {
+        let expected = "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea250554\
+                        9758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737";
+        assert_eq!(
+            hex::encode(hmac_sha512(b"Jefe", b"what do ya want for nothing?")),
+            expected
+        );
+    }
+
+    #[test]
+    fn card_dedup_same_card_same_key_gives_same_hash() {
+        let key = master_key();
+        let a = CardDedupHmac::from_master_key(&key)
+            .unwrap()
+            .encode(CARD.to_vec())
+            .unwrap();
+        let b = CardDedupHmac::from_master_key(&key)
+            .unwrap()
+            .encode(CARD.to_vec())
+            .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn card_dedup_two_master_keys_give_two_hashes() {
+        let a = CardDedupHmac::from_master_key(&master_key())
+            .unwrap()
+            .encode(CARD.to_vec())
+            .unwrap();
+        let b = CardDedupHmac::from_master_key(&master_key())
+            .unwrap()
+            .encode(CARD.to_vec())
+            .unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn card_dedup_differs_from_plain_sha512_and_from_master_key() {
+        let key = master_key();
+        let algo = CardDedupHmac::from_master_key(&key).unwrap();
+        // The old code hashed the JSON-serialised number, that is, between double quotes.
+        let quoted = [b"\"", CARD, b"\""].concat();
+        let hash = algo.encode(quoted.clone()).unwrap();
+        assert_ne!(hash, sha512(CARD));
+        assert_ne!(hash, sha512(&quoted));
+        assert_eq!(algo.0.peek().len(), 64);
+        assert!(algo.0.peek() != key.peek(), "derived key equals master key");
+    }
+
+    #[test]
+    fn card_dedup_rejects_empty_master_key() {
+        assert!(CardDedupHmac::from_master_key(&Secret::new(Vec::new())).is_err());
+    }
+
+    #[test]
+    fn card_dedup_key_is_hkdf_of_master_key_with_context() {
+        struct Len64;
+        impl ring::hkdf::KeyType for Len64 {
+            fn len(&self) -> usize {
+                64
+            }
+        }
+
+        let key = master_key();
+        let mut expected = [0_u8; 64];
+        ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
+            .extract(key.peek())
+            .expand(&[CARD_DEDUP_INFO], Len64)
+            .unwrap()
+            .fill(&mut expected)
+            .unwrap();
+
+        let algo = CardDedupHmac::from_master_key(&key).unwrap();
+        assert!(
+            algo.0.peek() == &expected,
+            "derived key is not HKDF(master key, context)"
+        );
+        assert!(
+            algo.encode(CARD.to_vec()).unwrap() == hmac_sha512(&expected, CARD),
+            "hash is not one HMAC-SHA512 under the derived key"
+        );
+    }
+
+    #[test]
+    fn card_dedup_context_is_versioned_and_specific() {
+        assert_eq!(CARD_DEDUP_INFO, b"hyperswitch-card-vault/card-dedup/v1");
     }
 }

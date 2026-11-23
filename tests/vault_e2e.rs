@@ -17,6 +17,11 @@ use std::{
 use diesel::{
     Connection, PgConnection, QueryableByName, RunQueryDsl, connection::SimpleConnection,
 };
+use hyperswitch_card_vault::crypto::{
+    encryption_manager::{encryption_interface::Encryption, managers::aes::GcmAes256},
+    hash_manager::{hash_interface::Encode, managers::sha::CardDedupHmac},
+};
+use hyperswitch_masking::Secret;
 
 const CARD_NUMBER: &str = "4111111111111111";
 const MERCHANT: &str = "demo-merchant";
@@ -53,6 +58,12 @@ struct AuditRow {
     status_code: i16,
     #[diesel(sql_type = diesel::sql_types::Text)]
     text: String,
+}
+
+#[derive(QueryableByName, Debug)]
+struct HashRow {
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    data_hash: Vec<u8>,
 }
 
 impl TestDb {
@@ -92,6 +103,15 @@ impl TestDb {
 
     fn exec(&self, sql: &str) {
         self.connection().batch_execute(sql).expect("execute SQL");
+    }
+
+    fn data_hashes(&self) -> Vec<Vec<u8>> {
+        diesel::sql_query("SELECT data_hash FROM hash_table")
+            .load::<HashRow>(&mut self.connection())
+            .expect("read hash_table")
+            .into_iter()
+            .map(|row| row.data_hash)
+            .collect()
     }
 
     fn audit_rows(&self) -> Vec<AuditRow> {
@@ -272,20 +292,24 @@ async fn unlock(vault: &Vault, keys: &Keys) {
     assert_eq!(status, 200, "decrypt");
 }
 
-async fn store_card(vault: &Vault) -> String {
+/// Stores the test card for `merchant` and returns the parsed `/data/add` response.
+async fn store_card_for(vault: &Vault, merchant: &str) -> serde_json::Value {
     let (status, body) = vault
         .post(
             "/data/add",
             serde_json::json!({
-                "merchant_id": MERCHANT,
+                "merchant_id": merchant,
                 "merchant_customer_id": CUSTOMER,
                 "card": { "card_number": CARD_NUMBER }
             }),
         )
         .await;
     assert_eq!(status, 200, "add card");
-    let body: serde_json::Value = serde_json::from_str(&body).expect("add response JSON");
-    body["payload"]["card_reference"]
+    serde_json::from_str(&body).expect("add response JSON")
+}
+
+async fn store_card(vault: &Vault) -> String {
+    store_card_for(vault, MERCHANT).await["payload"]["card_reference"]
         .as_str()
         .expect("card_reference")
         .to_string()
@@ -456,5 +480,71 @@ async fn custodian_key_is_refused_when_audit_table_is_unwritable() {
             ("custodian_key2", "success"),
             ("custodian_decrypt", "failure"),
         ]
+    );
+}
+
+#[tokio::test]
+async fn same_card_for_two_merchants_shares_one_hash_row() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    store_card_for(&vault, MERCHANT).await;
+    store_card_for(&vault, "demo-merchant-2").await;
+    // Same merchant and same customer as the first call.
+    let again = store_card_for(&vault, MERCHANT).await;
+
+    assert_eq!(
+        db.data_hashes().len(),
+        1,
+        "one duplicate-check row per card and tenant"
+    );
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+}
+
+#[tokio::test]
+async fn stored_card_hash_is_not_a_plain_sha512() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card(&vault).await;
+
+    let sha512 = |data: &[u8]| {
+        ring::digest::digest(&ring::digest::SHA512, data)
+            .as_ref()
+            .to_vec()
+    };
+    let hashes = db.data_hashes();
+    assert_eq!(hashes.len(), 1);
+    let stored = &hashes[0];
+    assert_eq!(stored.len(), 64, "full HMAC-SHA512, not truncated");
+    assert!(
+        *stored != sha512(CARD_NUMBER.as_bytes()),
+        "stored hash is the plain SHA-512 of the card number"
+    );
+    // The bytes the unkeyed version hashed: the JSON-serialised number, between double quotes.
+    let hashed_bytes = format!("\"{CARD_NUMBER}\"");
+    assert!(
+        *stored != sha512(hashed_bytes.as_bytes()),
+        "stored hash is the plain SHA-512 of the JSON-serialised card number"
+    );
+
+    // Recompute the expected keyed hash: unlock the master key as the custodians do (AES-GCM under
+    // key 1 + key 2), then HMAC under the derived key. Values stay in memory and are never printed.
+    let custodian_key = hex::decode(format!("{}{}", keys.key1, keys.key2)).expect("custodian key");
+    let master_key = GcmAes256::new(custodian_key)
+        .decrypt(hex::decode(&keys.master_key).expect("encrypted master key"))
+        .expect("decrypt master key");
+    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key))
+        .expect("derive dedup key")
+        .encode(hashed_bytes.into_bytes())
+        .expect("keyed hash");
+    assert!(
+        *stored == expected,
+        "stored hash is not the HMAC-SHA512 under the derived key"
     );
 }

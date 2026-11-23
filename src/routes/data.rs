@@ -13,7 +13,7 @@ use self::types::Validation;
 use crate::{
     app::TenantAppState,
     audit,
-    crypto::{hash_manager::managers::sha::Sha512, keymanager},
+    crypto::{hash_manager::managers::sha::CardDedupHmac, keymanager},
     custom_extractors::{AuditRequestId, OptionalFingerprintId, TenantStateResolver},
     domain::{fingerprint, hash},
     error::{self, ContainerError, ResultContainerExt},
@@ -112,8 +112,12 @@ async fn add_card_inner(
 ) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
     request.validate()?;
 
+    // Keyed duplicate-check hash: HMAC-SHA512 under a key derived from the tenant master key.
+    let dedup_hmac =
+        CardDedupHmac::from_master_key(&tenant_app_state.config.tenant_secrets.master_key)
+            .change_error(error::ApiError::EncodingError)?;
     let hash_data = Secret::new(
-        transformers::get_hash(&request.data, Sha512)
+        transformers::get_hash(&request.data, dedup_hmac)
             .change_error(error::ApiError::EncodingError)?,
     );
 

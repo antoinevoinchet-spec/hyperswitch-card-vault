@@ -35,6 +35,13 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `src/storage.rs`: the database connection URI now percent-encodes the space in its `options` value, which libpq 18 and later reject (found by the new CI job), with a unit test.
   - `docs/tokenization.md`: new page on what the vault already does for tokenization.
   - `docs/superpowers/specs/2026-11-23-demo-and-ci-db-design.md` and `docs/superpowers/plans/2026-11-23-demo-and-ci-db.md`: design and implementation plan.
+- Keyed duplicate-check hash (the hash of the card number kept in `hash_table` is now an HMAC-SHA512 under a key derived from the tenant master key, instead of a plain SHA-512):
+  - `src/crypto/hash_manager/managers/sha.rs`: new `CardDedupHmac` type (HKDF-SHA512 key derivation and HMAC-SHA512, both from `ring`), with unit tests including an RFC 4231 vector.
+  - `src/routes/data.rs`: `/data/add` uses `CardDedupHmac` instead of `Sha512` for the duplicate check.
+  - `src/routes/data/transformers.rs`: unit test of `get_hash` with the keyed hash.
+  - `tests/vault_e2e.rs`: two end-to-end tests (one row for a card stored by two merchants; the stored value is not a plain SHA-512).
+  - `docs/tokenization.md`: describes the keyed hash, what happens to rows written before it, and updated line references.
+  - `docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md` and `docs/superpowers/plans/2026-11-23-keyed-card-hash.md`: design and implementation plan.
 
 ## Demo
 
