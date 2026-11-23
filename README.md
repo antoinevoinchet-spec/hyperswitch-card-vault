@@ -32,6 +32,7 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `src/tenant.rs`: added an audit-only storage per tenant, usable before the custodians unlock it.
   - `src/routes/key_custodian.rs`: `/custodian/key1`, `/custodian/key2` and a failed `/custodian/decrypt` now write an `audit_log` row, and a key is refused when its row cannot be written.
   - `src/audit.rs`: removed `emit_audit_event`, which had no caller left.
+  - `src/storage.rs`: the database connection URI now percent-encodes the space in its `options` value, which libpq 18 and later reject (found by the new CI job), with a unit test.
   - `docs/tokenization.md`: new page on what the vault already does for tokenization.
   - `docs/superpowers/specs/2026-11-23-demo-and-ci-db-design.md` and `docs/superpowers/plans/2026-11-23-demo-and-ci-db.md`: design and implementation plan.
 
