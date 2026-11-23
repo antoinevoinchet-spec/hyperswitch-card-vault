@@ -24,6 +24,16 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `src/lib.rs`: registered the `audit` module.
   - `src/routes/data.rs`, `src/routes/routes_v2/data.rs`, `src/routes/entity.rs`, `src/routes/key_migration.rs`, `src/routes/key_custodian.rs`: each handler records its operation.
   - `docs/superpowers/specs/2026-11-20-audit-log-design.md` and `docs/superpowers/plans/2026-11-20-audit-log.md`: design and implementation plan.
+- Demo, end-to-end tests and custodian audit rows (see [demo/README.md](./demo/README.md)):
+  - `demo/run.sh` and `demo/README.md`: new one-command demo of a test card's journey, with the audit rows it leaves, and its explanation.
+  - `Makefile`: added the `demo` target.
+  - `tests/vault_e2e.rs`: new end-to-end tests that start the vault against a real PostgreSQL (card journey rows, fail-closed retrieve, custodian rows, refused custodian key).
+  - `.github/workflows/CI-pr.yml`: added the `integration-db` job, which runs those tests and the demo against a PostgreSQL service; existing jobs are unchanged.
+  - `src/tenant.rs`: added an audit-only storage per tenant, usable before the custodians unlock it.
+  - `src/routes/key_custodian.rs`: `/custodian/key1`, `/custodian/key2` and a failed `/custodian/decrypt` now write an `audit_log` row, and a key is refused when its row cannot be written.
+  - `src/audit.rs`: removed `emit_audit_event`, which had no caller left.
+  - `docs/tokenization.md`: new page on what the vault already does for tokenization.
+  - `docs/superpowers/specs/2026-11-23-demo-and-ci-db-design.md` and `docs/superpowers/plans/2026-11-23-demo-and-ci-db.md`: design and implementation plan.
 
 ## Demo
 

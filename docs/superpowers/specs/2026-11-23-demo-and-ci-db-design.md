@@ -184,7 +184,8 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
 - **E8. Tokenization page.** `docs/tokenization.md`, titled "What the vault already does for
   tokenization", describes the existing behaviour with the PCI SSC tokenization vocabulary (token,
   reversible token, card data vault, mapping, de-tokenization, and the non-reversible fingerprint),
-  taken from the PCI SSC information supplement on tokenization (2011), read before writing. Every statement
+  taken from the PCI SSC tokenization product security guidelines (version 1.0, April 2015), read
+  before writing (the 2011 supplement first planned could not be read as text). Every statement
   about the vault cites a test name or a `file:line`. It states what the vault does not do (for
   example format-preserving tokens) without proposing to build it.
   Verifiable by: every paragraph about current behaviour in `docs/tokenization.md` ends with a test
