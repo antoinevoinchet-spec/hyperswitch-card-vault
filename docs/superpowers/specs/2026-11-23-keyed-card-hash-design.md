@@ -1,7 +1,7 @@
 # Keyed card hash for the duplicate check: design
 
 Date: 2026-11-23. Branch: `fix/keyed-card-hash` (from `main`, `7f3eb55`). Status: decisions I3 and I4
-taken by the owner; ready for the plan.
+taken by the owner; implemented on this branch.
 
 ## Intent
 
