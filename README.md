@@ -45,6 +45,7 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
 - Threat model table (each protection linked to the test that proves it, each known limit to the text that describes it):
   - `docs/threat-model.md`: new table of threats, attacks, controls, evidence and status.
   - `scripts/check-threat-model.sh`: new script that checks that every test, line and demo check cited in the table exists.
+  - `.github/workflows/CI-pr.yml`: added the `threat-model` job, which runs that script on every pull request; existing jobs are unchanged.
   - `docs/tokenization.md`: added a link to the table.
   - `docs/superpowers/specs/2026-11-23-threat-model-table-design.md` and `docs/superpowers/plans/2026-11-23-threat-model-table.md`: design and implementation plan.
 
