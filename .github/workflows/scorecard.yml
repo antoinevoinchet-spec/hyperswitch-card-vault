@@ -46,7 +46,7 @@ jobs:
       - name: Print the score of each check
         shell: bash
         env:
-          RESULTS: results.json
+          RESULTS: missing.json
         run: |
           count=$(jq '.checks | length' "$RESULTS")
           if [ -z "$count" ] || [ "$count" -eq 0 ]; then

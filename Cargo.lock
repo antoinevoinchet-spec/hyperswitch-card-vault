@@ -51,7 +51,7 @@ dependencies = [
  "pin-project-lite",
  "rand 0.9.4",
  "sha1",
- "smallvec",
+ "smallvec 1.15.2",
  "tokio",
  "tokio-util",
  "tracing",
@@ -166,7 +166,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "smallvec",
+ "smallvec 1.15.2",
  "socket2 0.6.2",
  "time",
  "tracing",
@@ -879,7 +879,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "smallvec",
+ "smallvec 1.15.2",
  "tokio",
  "tower 0.5.3",
  "url",
@@ -2503,7 +2503,7 @@ dependencies = [
  "nonempty",
  "parking_lot",
  "signal-hook",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -2543,7 +2543,7 @@ dependencies = [
  "gix-quote",
  "gix-trace",
  "kstring",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
  "unicode-bom",
 ]
@@ -2573,7 +2573,7 @@ dependencies = [
  "gix-trace",
  "gix-traverse",
  "gix-worktree",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -2626,7 +2626,7 @@ dependencies = [
  "gix-path",
  "gix-ref",
  "gix-sec",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
  "unicode-bom",
 ]
@@ -2778,7 +2778,7 @@ dependencies = [
  "gix-quote",
  "gix-trace",
  "gix-utils",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -2878,7 +2878,7 @@ dependencies = [
  "libc",
  "memmap2",
  "rustix 1.1.4",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -2948,7 +2948,7 @@ dependencies = [
  "gix-utils",
  "gix-validate",
  "itoa",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -2990,7 +2990,7 @@ dependencies = [
  "gix-tempfile",
  "memmap2",
  "parking_lot",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -3115,7 +3115,7 @@ dependencies = [
  "gix-hash",
  "gix-revision",
  "gix-validate",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -3150,7 +3150,7 @@ dependencies = [
  "gix-hash",
  "gix-hashtable",
  "gix-object",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -3267,7 +3267,7 @@ dependencies = [
  "gix-hashtable",
  "gix-object",
  "gix-revwalk",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror 2.0.19",
 ]
 
@@ -3793,7 +3793,7 @@ dependencies = [
  "httpdate",
  "itoa",
  "pin-project-lite",
- "smallvec",
+ "smallvec 1.15.2",
  "tokio",
  "want",
 ]
@@ -3945,6 +3945,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_path_to_error",
+ "smallvec 0.6.13",
+ "smallvec 1.13.2",
  "strum 0.28.0",
  "thiserror 1.0.69",
  "time",
@@ -4011,7 +4013,7 @@ dependencies = [
  "icu_normalizer_data",
  "icu_properties",
  "icu_provider",
- "smallvec",
+ "smallvec 1.15.2",
  "zerovec",
 ]
 
@@ -4075,7 +4077,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b0875f23caa03898994f6ddc501886a45c7d3d62d04d2d90788d47be1b1e4de"
 dependencies = [
  "idna_adapter",
- "smallvec",
+ "smallvec 1.15.2",
  "utf8_iter",
 ]
 
@@ -4501,6 +4503,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "maybe-uninit"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60302e4db3a61da70c0cb7991976248362f30319e88850c487b9b95bbf059e00"
+
+[[package]]
 name = "md5"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4603,7 +4611,7 @@ dependencies = [
  "parking_lot",
  "quanta",
  "rustc_version",
- "smallvec",
+ "smallvec 1.15.2",
  "tagptr",
  "thiserror 1.0.69",
  "triomphe",
@@ -4696,7 +4704,7 @@ dependencies = [
  "num-iter",
  "num-traits",
  "rand 0.8.5",
- "smallvec",
+ "smallvec 1.15.2",
  "zeroize",
 ]
 
@@ -5032,7 +5040,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall 0.5.3",
- "smallvec",
+ "smallvec 1.15.2",
  "windows-link",
 ]
 
@@ -6605,6 +6613,20 @@ dependencies = [
 
 [[package]]
 name = "smallvec"
+version = "0.6.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7b0758c52e15a8b5e3691eae6cc559f08eee9406e548a4477ba4e67770a82b6"
+dependencies = [
+ "maybe-uninit",
+]
+
+[[package]]
+name = "smallvec"
+version = "1.13.2"
+source = "git+https://github.com/servo/rust-smallvec?tag=v1.13.2#0089d0a15bee4792a575b9c51e9d7ace39b3957c"
+
+[[package]]
+name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
@@ -7473,7 +7495,7 @@ dependencies = [
  "once_cell",
  "opentelemetry 0.27.1",
  "opentelemetry_sdk 0.27.1",
- "smallvec",
+ "smallvec 1.15.2",
  "tracing",
  "tracing-core",
  "tracing-log",
@@ -7504,7 +7526,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sharded-slab",
- "smallvec",
+ "smallvec 1.15.2",
  "thread_local",
  "tracing",
  "tracing-core",

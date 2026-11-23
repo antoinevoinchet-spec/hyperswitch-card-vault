@@ -19,7 +19,7 @@ yanked = "warn"
 # Read from the first run of the check on this branch (2026-11-23): 45 known vulnerabilities and 3
 # unsound notices on direct dependencies.
 ignore = [
-    { id = "RUSTSEC-2021-0157", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2021-0157", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2026-11-01" }, # ammonia
     { id = "RUSTSEC-2021-0158", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
     { id = "RUSTSEC-2023-0071", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rsa
     { id = "RUSTSEC-2025-0022", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
@@ -79,7 +79,6 @@ allow = [
     "ISC",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "Zlib",
     "CC0-1.0",
     "MPL-2.0",
     "OpenSSL",

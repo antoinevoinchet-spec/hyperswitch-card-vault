@@ -81,6 +81,9 @@ reqwest = { version = "0.12.7", features = ["json", "__rustls"] }
 argh = "0.1.12"
 
 nanoid = "0.4.0"
+# BREAKAGE (never merged): a crates.io release with a known vulnerability, and a git source outside allow-git.
+smallvec = "=0.6.13"
+smallvec-git = { package = "smallvec", git = "https://github.com/servo/rust-smallvec", tag = "v1.13.2" }
 
 crc32fast = { version = "1.4", optional = true }
 strum = { version = "0.28.0", features = ["derive"] }
