@@ -237,24 +237,6 @@ pub(crate) async fn record<S: AuditInterface, T>(
     }
 }
 
-/// Audit trace for operations that cannot reach the audit table (custodian steps before the
-/// tenant's database exists). Logged at WARN so the default log filter keeps it.
-pub fn emit_audit_event(
-    operation: AuditOperation,
-    tenant_id: &str,
-    request_id: Option<&str>,
-    success: bool,
-) {
-    logger::warn!(
-        audit = true,
-        operation = operation.as_str(),
-        tenant_id = %tenant_id,
-        request_id = ?request_id,
-        outcome = if success { "success" } else { "failure" },
-        "audit event"
-    );
-}
-
 /// Entry for `/data/add` and `/cards/add`. The stored reference is added from the response.
 pub fn store_card_audit(
     tenant_id: &str,

@@ -264,12 +264,11 @@ impl Storage {
     pub fn get_redis_store(&self) -> Option<redis_store::TenantAwareRedisStore> {
         self.redis.clone()
     }
-    async fn create_database_connection_pool(
-        database_config: &Database,
-        schema: &str,
-    ) -> error_stack::Result<PgPool, error::StorageError> {
-        let database_url = format!(
-            "postgres://{}:{}@{}:{}/{}?application_name={}&options=-c search_path%3D{}",
+    /// Connection URI for the pool. The space in `options` is percent-encoded: libpq 18 and later
+    /// reject a raw space in a URI query value.
+    fn database_url(database_config: &Database, schema: &str) -> String {
+        format!(
+            "postgres://{}:{}@{}:{}/{}?application_name={}&options=-c%20search_path%3D{}",
             database_config.username,
             database_config.password.peek(),
             database_config.host,
@@ -277,7 +276,14 @@ impl Storage {
             database_config.dbname,
             schema,
             schema
-        );
+        )
+    }
+
+    async fn create_database_connection_pool(
+        database_config: &Database,
+        schema: &str,
+    ) -> error_stack::Result<PgPool, error::StorageError> {
+        let database_url = Self::database_url(database_config, schema);
 
         let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new(database_url);
         let mut pool = bb8::Pool::builder();
@@ -855,4 +861,35 @@ where
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn database_config() -> Database {
+        Database {
+            username: "db_user".to_string(),
+            password: Secret::new("db_pass".to_string()),
+            host: "localhost".to_string(),
+            port: 5432,
+            dbname: "locker".to_string(),
+            pool_size: None,
+            max_lifetime: None,
+            min_idle: None,
+            idle_timeout: None,
+            connection_timeout: None,
+        }
+    }
+
+    /// libpq 18 and later reject a connection URI with a raw space in a query value.
+    #[test]
+    fn database_url_has_no_raw_space() {
+        let url = Storage::database_url(&database_config(), "public");
+
+        assert!(!url.contains(' '), "raw space in the database URL");
+        assert!(url.ends_with("?application_name=public&options=-c%20search_path%3Dpublic"));
+    }
 }

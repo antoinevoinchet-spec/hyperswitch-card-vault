@@ -6,3 +6,7 @@ docker-run:
 
 docker-it-run:
 	docker run -v `pwd`/config/docker-configuration.toml:/local/config/development.toml -it locker /bin/bash
+
+.PHONY: demo
+demo:
+	./demo/run.sh
