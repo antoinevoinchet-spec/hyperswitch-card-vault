@@ -28,6 +28,8 @@ fi
 if [ -z "${PG_BIN:-}" ]; then
   if command -v pg_ctl >/dev/null 2>&1; then
     PG_BIN=$(dirname "$(command -v pg_ctl)")
+  elif command -v pg_config >/dev/null 2>&1; then
+    PG_BIN=$(pg_config --bindir)
   else
     PG_BIN=/opt/homebrew/opt/postgresql@14/bin
   fi
@@ -142,7 +144,9 @@ step() {
   fi
 }
 
-key_body() { jq -cn --arg key "$1" '{key: $key}'; }
+# Built with the shell's printf (a builtin), so the key is never a command-line argument. The keys
+# are hex, so no JSON escaping is needed.
+key_body() { printf '{"key":"%s"}' "$1"; }
 HIDDEN='{"key":"<hidden>"}'
 
 step 1 200 "custodian 1 sends key 1" \
@@ -167,6 +171,10 @@ step 6 200 "store the test card" \
   "The card is encrypted with the merchant's key (itself encrypted with the master key) and stored. The vault returns a random reference instead of the card." \
   /data/add "$STORE_BODY"
 REFERENCE=$(jq -r '.payload.card_reference' "$TMP/body")
+if [ -z "$REFERENCE" ] || [ "$REFERENCE" = null ]; then
+  echo "FAILED: step 6 returned no card_reference" >&2
+  exit 1
+fi
 
 LOCKER_ROWS=$(sql -At -c "SELECT count(*) FROM locker")
 LOCKER_HITS=$(sql -At -c "SELECT count(*) FROM locker WHERE position(convert_to('${CARD}', 'UTF8') in enc_data) > 0")
@@ -177,6 +185,10 @@ REF_BODY=$(jq -cn --arg m "$MERCHANT" --arg c "$CUSTOMER" --arg r "$REFERENCE" \
 step 7 200 "read the card back with its reference" \
   "The vault decrypts the stored row and returns the card. The audit row records the reference, never the card." \
   /data/retrieve "$REF_BODY"
+if [ "$(jq -r '.payload.card.card_number' "$TMP/body")" != "$CARD" ]; then
+  echo "FAILED: step 7 did not return the stored card" >&2
+  exit 1
+fi
 
 FP_BODY=$(jq -cn --arg d "$CARD" --arg k "demo-fingerprint-key" '{data: $d, key: $k}')
 FP_SHOWN=$(jq -cn --arg d "$CARD" '{data: $d, key: "<hidden>"}')
@@ -193,22 +205,27 @@ step 10 error "read after delete" \
 title "Audit log (table audit_log, UTC)"
 sql -P pager=off -c "SELECT to_char(created_at, 'HH24:MI:SS.MS') AS created_at_utc, operation, merchant_id, customer_id, resource_id, outcome, status_code, error_type FROM audit_log ORDER BY created_at, audit_id"
 AUDIT_ROWS=$(sql -At -c "SELECT count(*) FROM audit_log")
+AUDIT_SEQUENCE=$(sql -At -c "SELECT string_agg(operation || ':' || outcome || ':' || status_code, ',' ORDER BY created_at, audit_id) FROM audit_log")
+EXPECTED_SEQUENCE="custodian_key1:success:200,custodian_key2:success:200,custodian_decrypt:failure:401,custodian_key2:success:200,custodian_decrypt:success:200,locker_add:success:200,locker_retrieve:success:200,fingerprint:success:200,locker_delete:success:200,locker_retrieve:failure:404"
 AUDIT_HITS=$(sql -At -c "SELECT count(*) FROM audit_log WHERE audit_log::text LIKE '%${CARD}%'")
 LOG_HITS=$(grep -cF "$CARD" "$TMP/locker.log" || true)
 KEY_HITS=0
 for value in "$KEY1" "$KEY2" "$WRONG_KEY2" "$MASTER_KEY"; do
-  hits=$(grep -cF "$value" "$TMP/out" || true)
+  # The value goes to grep as a pattern file, not as an argument.
+  hits=$(grep -cF -f <(printf '%s\n' "$value") "$TMP/out" || true)
   KEY_HITS=$((KEY_HITS + hits))
 done
 
 title "Checks"
 echo "audit rows written by the journey: ${AUDIT_ROWS} (expected 10)"
+if [ "$AUDIT_SEQUENCE" = "$EXPECTED_SEQUENCE" ]; then SEQUENCE_OK=yes; else SEQUENCE_OK=no; fi
+echo "audit rows match the journey step by step (operation, outcome, status): ${SEQUENCE_OK} (expected yes)"
 echo "audit rows containing the card number: ${AUDIT_HITS} (expected 0)"
 echo "locker rows while the card was stored: ${LOCKER_ROWS} (expected at least 1); of them, containing the card number in clear: ${LOCKER_HITS} (expected 0)"
 echo "server log lines containing the card number: ${LOG_HITS} (measured, see demo/README.md)"
 echo "generated key values found in this output: ${KEY_HITS} (expected 0)"
 
-if [ "$AUDIT_ROWS" -ne 10 ] || [ "$AUDIT_HITS" -ne 0 ] || [ "$LOCKER_ROWS" -lt 1 ] ||
+if [ "$AUDIT_ROWS" -ne 10 ] || [ "$SEQUENCE_OK" != yes ] || [ "$AUDIT_HITS" -ne 0 ] || [ "$LOCKER_ROWS" -lt 1 ] ||
    [ "$LOCKER_HITS" -ne 0 ] || [ "$KEY_HITS" -ne 0 ]; then
   echo "DEMO FAILED: a check did not match" >&2
   exit 1

@@ -23,10 +23,11 @@ The script (`demo/run.sh`):
    (`DEMO_PG_PORT` to change it), and applies every migration, including the `audit_log` table;
 3. generates a throwaway encrypted master key and its two custodian keys with `utils master-key`;
 4. starts the vault and plays the ten steps below;
-5. prints the audit log and five checks, then stops the vault, stops the cluster and deletes the
+5. prints the audit log and six checks, then stops the vault, stops the cluster and deletes the
    temporary folder, even if a step fails or the run is interrupted.
 
-It exits with code 0 only if every step returns the expected status and every check matches. In CI,
+It exits with code 0 only if every step returns the expected status, step 7 returns the card that
+was stored, and every check matches. In CI,
 `DEMO_DATABASE_URL` points it to an existing empty database instead of a throwaway cluster.
 
 ## How the keys fit together
@@ -90,6 +91,8 @@ passing the Luhn check) is stored as `redacted`. See `src/audit.rs`.
 ## The checks at the end
 
 - audit rows written by the journey: 10;
+- audit rows match the journey step by step (operation, outcome and status of each of the ten
+  steps, in order): yes;
 - audit rows containing the card number: 0;
 - `locker` rows while the card was stored: at least 1, and 0 of them contain the card number in
   clear;
