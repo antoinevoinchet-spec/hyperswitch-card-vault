@@ -78,29 +78,51 @@ impl<const N: usize> Encode<Secret<Vec<u8>>, Secret<Vec<u8>>> for HmacSha512<N> 
 }
 
 /// HKDF context of the duplicate-check key. It is specific to this use and versioned, so the derived
-/// key is independent of every other key taken from the tenant master key.
-pub const CARD_DEDUP_INFO: &[u8] = b"hyperswitch-card-vault/card-dedup/v1";
+/// key is independent of every other key taken from the tenant master key. `v1` was tenant-wide;
+/// `v2` is followed by the merchant and customer ids (see [`CardDedupHmac::from_master_key`]).
+pub const CARD_DEDUP_INFO: &[u8] = b"hyperswitch-card-vault/card-dedup/v2";
 
 ///
 /// Keyed hash of the card data used by the `/data/add` duplicate check (`hash_table.data_hash`).
 ///
-/// The key is derived with HKDF-SHA512 from the tenant master key and [`CARD_DEDUP_INFO`]; the hash
-/// is one plain HMAC-SHA512 of the input, 64 bytes, never truncated. Both come from `ring`.
+/// The key is derived with HKDF-SHA512 from the tenant master key, [`CARD_DEDUP_INFO`] and the
+/// merchant and customer ids, so the same card gives different hashes for different merchants or
+/// customers; the hash is one plain HMAC-SHA512 of the input, 64 bytes, never truncated. Both come
+/// from `ring`.
 ///
 pub struct CardDedupHmac(Secret<Vec<u8>>);
 
 impl CardDedupHmac {
     pub fn from_master_key(
         master_key: &Secret<Vec<u8>>,
+        merchant_id: &str,
+        customer_id: &str,
     ) -> Result<Self, error::ContainerError<error::CryptoError>> {
         if master_key.peek().is_empty() {
             return Err(error::CryptoError::InvalidData("empty master key").into());
         }
 
+        // Each id is preceded by its length (8 bytes, big-endian), so that two different
+        // (merchant, customer) pairs can never give the same info once `ring` joins the parts.
+        let length_prefix = |id: &str| {
+            u64::try_from(id.len())
+                .map(u64::to_be_bytes)
+                .map_err(|_| error::CryptoError::InvalidData("card dedup scope id too long"))
+        };
+        let merchant_len = length_prefix(merchant_id)?;
+        let customer_len = length_prefix(customer_id)?;
+        let info: [&[u8]; 5] = [
+            CARD_DEDUP_INFO,
+            &merchant_len,
+            merchant_id.as_bytes(),
+            &customer_len,
+            customer_id.as_bytes(),
+        ];
+
         let mut key = vec![0_u8; ring::hkdf::KeyType::len(&ring::hkdf::HKDF_SHA512)];
         ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
             .extract(master_key.peek())
-            .expand(&[CARD_DEDUP_INFO], ring::hkdf::HKDF_SHA512)
+            .expand(&info, ring::hkdf::HKDF_SHA512)
             .and_then(|okm| okm.fill(&mut key))
             .map_err(|_| error::CryptoError::InvalidData("card dedup key derivation failed"))?;
 
@@ -255,38 +277,61 @@ mod tests {
         );
     }
 
+    const MERCHANT: &str = "merchant-1";
+    const CUSTOMER: &str = "customer-1";
+
+    fn card_hash(key: &Secret<Vec<u8>>, merchant: &str, customer: &str) -> Vec<u8> {
+        CardDedupHmac::from_master_key(key, merchant, customer)
+            .unwrap()
+            .encode(CARD.to_vec())
+            .unwrap()
+    }
+
     #[test]
-    fn card_dedup_same_card_same_key_gives_same_hash() {
+    fn card_dedup_same_scope_gives_same_hash() {
         let key = master_key();
-        let a = CardDedupHmac::from_master_key(&key)
-            .unwrap()
-            .encode(CARD.to_vec())
-            .unwrap();
-        let b = CardDedupHmac::from_master_key(&key)
-            .unwrap()
-            .encode(CARD.to_vec())
-            .unwrap();
-        assert_eq!(a, b);
+        let a = card_hash(&key, MERCHANT, CUSTOMER);
+        assert_eq!(a, card_hash(&key, MERCHANT, CUSTOMER));
         assert_eq!(a.len(), 64);
     }
 
     #[test]
+    fn card_dedup_two_merchants_give_two_hashes() {
+        let key = master_key();
+        assert_ne!(
+            card_hash(&key, MERCHANT, CUSTOMER),
+            card_hash(&key, "merchant-2", CUSTOMER)
+        );
+    }
+
+    #[test]
+    fn card_dedup_two_customers_give_two_hashes() {
+        let key = master_key();
+        assert_ne!(
+            card_hash(&key, MERCHANT, CUSTOMER),
+            card_hash(&key, MERCHANT, "customer-2")
+        );
+    }
+
+    #[test]
+    fn card_dedup_scope_framing_is_unambiguous() {
+        // Without a length before each id, both scopes would give the same HKDF info.
+        let key = master_key();
+        assert_ne!(card_hash(&key, "ab", "c"), card_hash(&key, "a", "bc"));
+    }
+
+    #[test]
     fn card_dedup_two_master_keys_give_two_hashes() {
-        let a = CardDedupHmac::from_master_key(&master_key())
-            .unwrap()
-            .encode(CARD.to_vec())
-            .unwrap();
-        let b = CardDedupHmac::from_master_key(&master_key())
-            .unwrap()
-            .encode(CARD.to_vec())
-            .unwrap();
-        assert_ne!(a, b);
+        assert_ne!(
+            card_hash(&master_key(), MERCHANT, CUSTOMER),
+            card_hash(&master_key(), MERCHANT, CUSTOMER)
+        );
     }
 
     #[test]
     fn card_dedup_differs_from_plain_sha512_and_from_master_key() {
         let key = master_key();
-        let algo = CardDedupHmac::from_master_key(&key).unwrap();
+        let algo = CardDedupHmac::from_master_key(&key, MERCHANT, CUSTOMER).unwrap();
         // The old code hashed the JSON-serialised number, that is, between double quotes.
         let quoted = [b"\"", CARD, b"\""].concat();
         let hash = algo.encode(quoted.clone()).unwrap();
@@ -298,7 +343,9 @@ mod tests {
 
     #[test]
     fn card_dedup_rejects_empty_master_key() {
-        assert!(CardDedupHmac::from_master_key(&Secret::new(Vec::new())).is_err());
+        assert!(
+            CardDedupHmac::from_master_key(&Secret::new(Vec::new()), MERCHANT, CUSTOMER).is_err()
+        );
     }
 
     #[test]
@@ -310,16 +357,25 @@ mod tests {
             }
         }
 
+        // Info, written out here: context, then each id preceded by its length (8 bytes, big-endian).
+        let info = [
+            CARD_DEDUP_INFO,
+            &10_u64.to_be_bytes(),
+            b"merchant-1",
+            &10_u64.to_be_bytes(),
+            b"customer-1",
+        ]
+        .concat();
         let key = master_key();
         let mut expected = [0_u8; 64];
         ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
             .extract(key.peek())
-            .expand(&[CARD_DEDUP_INFO], Len64)
+            .expand(&[&info], Len64)
             .unwrap()
             .fill(&mut expected)
             .unwrap();
 
-        let algo = CardDedupHmac::from_master_key(&key).unwrap();
+        let algo = CardDedupHmac::from_master_key(&key, MERCHANT, CUSTOMER).unwrap();
         assert!(
             algo.0.peek() == &expected,
             "derived key is not HKDF(master key, context)"
@@ -332,6 +388,6 @@ mod tests {
 
     #[test]
     fn card_dedup_context_is_versioned_and_specific() {
-        assert_eq!(CARD_DEDUP_INFO, b"hyperswitch-card-vault/card-dedup/v1");
+        assert_eq!(CARD_DEDUP_INFO, b"hyperswitch-card-vault/card-dedup/v2");
     }
 }

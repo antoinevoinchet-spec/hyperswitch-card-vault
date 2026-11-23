@@ -66,6 +66,20 @@ struct HashRow {
     data_hash: Vec<u8>,
 }
 
+#[derive(QueryableByName, Debug)]
+struct CountRow {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    n: i64,
+}
+
+#[derive(QueryableByName, Debug)]
+struct LockerHashRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    merchant_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    hash_id: String,
+}
+
 impl TestDb {
     fn create(admin: &str) -> Self {
         let name = format!("vault_test_{}", uuid::Uuid::now_v7().simple());
@@ -111,6 +125,24 @@ impl TestDb {
             .expect("read hash_table")
             .into_iter()
             .map(|row| row.data_hash)
+            .collect()
+    }
+
+    /// Number of rows in `table` (`hash_table` or `locker`) of this test's own database.
+    fn count(&self, table: &str) -> i64 {
+        diesel::sql_query(format!("SELECT count(*) AS n FROM {table}"))
+            .get_result::<CountRow>(&mut self.connection())
+            .expect("count rows")
+            .n
+    }
+
+    /// `(merchant_id, hash_id)` of every `locker` row, in insertion order.
+    fn locker_hash_ids(&self) -> Vec<(String, String)> {
+        diesel::sql_query("SELECT merchant_id, hash_id FROM locker ORDER BY id")
+            .load::<LockerHashRow>(&mut self.connection())
+            .expect("read locker")
+            .into_iter()
+            .map(|row| (row.merchant_id, row.hash_id))
             .collect()
     }
 
@@ -292,20 +324,30 @@ async fn unlock(vault: &Vault, keys: &Keys) {
     assert_eq!(status, 200, "decrypt");
 }
 
-/// Stores the test card for `merchant` and returns the parsed `/data/add` response.
-async fn store_card_for(vault: &Vault, merchant: &str) -> serde_json::Value {
+/// Stores `card_number` for `merchant` and `customer` and returns the parsed `/data/add` response.
+async fn store_card_as(
+    vault: &Vault,
+    merchant: &str,
+    customer: &str,
+    card_number: &str,
+) -> serde_json::Value {
     let (status, body) = vault
         .post(
             "/data/add",
             serde_json::json!({
                 "merchant_id": merchant,
-                "merchant_customer_id": CUSTOMER,
-                "card": { "card_number": CARD_NUMBER }
+                "merchant_customer_id": customer,
+                "card": { "card_number": card_number }
             }),
         )
         .await;
     assert_eq!(status, 200, "add card");
     serde_json::from_str(&body).expect("add response JSON")
+}
+
+/// Stores the test card for `merchant` and returns the parsed `/data/add` response.
+async fn store_card_for(vault: &Vault, merchant: &str) -> serde_json::Value {
+    store_card_as(vault, merchant, CUSTOMER, CARD_NUMBER).await
 }
 
 async fn store_card(vault: &Vault) -> String {
@@ -484,7 +526,7 @@ async fn custodian_key_is_refused_when_audit_table_is_unwritable() {
 }
 
 #[tokio::test]
-async fn same_card_for_two_merchants_shares_one_hash_row() {
+async fn same_card_for_two_merchants_gets_two_hash_rows() {
     let Some(admin) = admin_url() else { return };
     let db = TestDb::create(&admin);
     let keys = Keys::generate();
@@ -497,11 +539,135 @@ async fn same_card_for_two_merchants_shares_one_hash_row() {
     let again = store_card_for(&vault, MERCHANT).await;
 
     assert_eq!(
-        db.data_hashes().len(),
-        1,
-        "one duplicate-check row per card and tenant"
+        db.count("hash_table"),
+        2,
+        "one duplicate-check row per merchant and customer"
     );
     assert_eq!(again["payload"]["duplication_check"], "duplicated");
+    let rows = db.locker_hash_ids();
+    assert_eq!(rows.len(), 2, "the duplicate add stores no third copy");
+    assert_eq!(rows[0].0, MERCHANT);
+    assert_eq!(rows[1].0, "demo-merchant-2");
+    assert_ne!(
+        rows[0].1, rows[1].1,
+        "a database reader can link the two merchants through hash_id"
+    );
+}
+
+/// Change in `(hash_table, locker)` row counts caused by one add.
+async fn rows_added_by(
+    db: &TestDb,
+    vault: &Vault,
+    merchant: &str,
+    customer: &str,
+    card_number: &str,
+) -> (i64, i64) {
+    let before = (db.count("hash_table"), db.count("locker"));
+    let response = store_card_as(vault, merchant, customer, card_number).await;
+    assert!(
+        response["payload"]["duplication_check"].is_null(),
+        "no duplication_check for {merchant}/{customer}"
+    );
+    (
+        db.count("hash_table") - before.0,
+        db.count("locker") - before.1,
+    )
+}
+
+#[tokio::test]
+async fn card_known_to_others_takes_the_new_card_path() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    // Each pair changes one fact: the card is new to the tenant, or known only to someone else.
+    // The "hash found" branch inserts no hash_table row, so equal changes mean it did not run.
+    // Public test card numbers, one per pair.
+    // Pair 1, card A: new card, then the same card for another merchant only.
+    let card_a = "5555555555554444";
+    let new_a = rows_added_by(&db, &vault, MERCHANT, CUSTOMER, card_a).await;
+    let other_merchant = rows_added_by(&db, &vault, "demo-merchant-2", CUSTOMER, card_a).await;
+    // Pair 2, card B: new card, then the same card for another customer of the same merchant only.
+    let card_b = "4012888888881881";
+    let new_b = rows_added_by(&db, &vault, MERCHANT, CUSTOMER, card_b).await;
+    let other_customer = rows_added_by(&db, &vault, MERCHANT, "demo-customer-2", card_b).await;
+
+    // What a database reader would compare: no two locker rows share a hash id, neither across
+    // merchants (pair 1) nor across customers of one merchant (pair 2).
+    let hash_ids: std::collections::BTreeSet<String> = db
+        .locker_hash_ids()
+        .into_iter()
+        .map(|(_, hash_id)| hash_id)
+        .collect();
+    assert_eq!(
+        hash_ids.len(),
+        4,
+        "two locker rows share a hash id, which links their owners"
+    );
+    assert_eq!(
+        (new_a, new_b),
+        ((1, 1), (1, 1)),
+        "a new card adds one row to each table"
+    );
+    // Both pairs are compared at once, so a failure shows each of them.
+    assert_eq!(
+        [
+            ("pair 1, other merchant", other_merchant),
+            ("pair 2, other customer", other_customer)
+        ],
+        [
+            ("pair 1, other merchant", new_a),
+            ("pair 2, other customer", new_b)
+        ],
+        "a card known only to someone else takes another path than a new card"
+    );
+}
+
+/// The master key as the custodians unlock it (AES-GCM under key 1 + key 2). Never printed.
+fn unlocked_master_key(keys: &Keys) -> Vec<u8> {
+    let custodian_key = hex::decode(format!("{}{}", keys.key1, keys.key2)).expect("custodian key");
+    GcmAes256::new(custodian_key)
+        .decrypt(hex::decode(&keys.master_key).expect("encrypted master key"))
+        .expect("decrypt master key")
+}
+
+#[tokio::test]
+async fn tenant_wide_v1_hash_row_is_not_matched() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    // The value an older deployment stored for this card: HKDF-SHA512 of the master key with the
+    // tenant-wide `v1` context, then one HMAC-SHA512 of the JSON-serialised number.
+    let master_key = unlocked_master_key(&keys);
+    let v1_key: ring::hmac::Key = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
+        .extract(&master_key)
+        .expand(
+            &[b"hyperswitch-card-vault/card-dedup/v1"],
+            ring::hmac::HMAC_SHA512,
+        )
+        .expect("expand v1 key")
+        .into();
+    let v1_hash = ring::hmac::sign(&v1_key, format!("\"{CARD_NUMBER}\"").as_bytes());
+    db.exec(&format!(
+        "INSERT INTO hash_table (hash_id, data_hash) VALUES ('legacy-v1', decode('{}', 'hex'))",
+        hex::encode(v1_hash.as_ref())
+    ));
+
+    let response = store_card_for(&vault, MERCHANT).await;
+    assert!(response["payload"]["duplication_check"].is_null());
+    assert_eq!(
+        db.count("hash_table"),
+        2,
+        "the v1 row was matched instead of a new scoped row"
+    );
+    let rows = db.locker_hash_ids();
+    assert_eq!(rows.len(), 1);
+    assert_ne!(rows[0].1, "legacy-v1", "the new card reuses the v1 hash_id");
 }
 
 #[tokio::test]
@@ -539,7 +705,7 @@ async fn stored_card_hash_is_not_a_plain_sha512() {
     let master_key = GcmAes256::new(custodian_key)
         .decrypt(hex::decode(&keys.master_key).expect("encrypted master key"))
         .expect("decrypt master key");
-    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key))
+    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key), MERCHANT, CUSTOMER)
         .expect("derive dedup key")
         .encode(hashed_bytes.into_bytes())
         .expect("keyed hash");

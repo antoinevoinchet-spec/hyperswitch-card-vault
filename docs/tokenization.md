@@ -62,13 +62,13 @@ describes it, in the [threat model table](./threat-model.md).
 ### `/data/retrieve` is de-tokenization
 
 - Given a `card_reference`, the vault finds the row and decrypts it
-  (`src/routes/data.rs:262`), then returns the card.
+  (`src/routes/data.rs:266`), then returns the card.
 - Access control in this code base is per tenant: every data call must carry a known `x-tenant-id`
   (`src/custom_extractors.rs:26-30`), and with the `middleware` feature every request body must be
   a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and every response is
   signed (`src/middleware.rs:81`). There is no finer per-caller rule.
 - Every de-tokenization leaves an audit row before the card leaves the vault, and none is returned if
-  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:241`),
+  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:245`),
   proven by `retrieve_fails_closed_when_audit_table_is_unwritable` (`tests/vault_e2e.rs`).
 - The row never holds the card: `store_card_entry_never_contains_card_number` (`src/audit.rs`) and
   the demo's check "audit rows containing the card number: 0".
@@ -84,23 +84,37 @@ describes it, in the [threat model table](./threat-model.md).
 - The audit row for a fingerprint takes nothing from the request: `fingerprint_entry_has_no_payload`
   (`src/audit.rs`).
 
-### The duplicate check uses a keyed hash
+### The duplicate check uses a keyed hash, scoped to the merchant and customer
 
 - To detect a card already stored, `/data/add` computes a hash of the card number
-  (`src/routes/data.rs:116-122`) and looks it up in `hash_table.data_hash`
+  (`src/routes/data.rs:115-126`) and looks it up in `hash_table.data_hash`
   (`src/storage/schema.rs:51-55`). That hash is one HMAC-SHA512 from `ring`
-  (`src/crypto/hash_manager/managers/sha.rs:120-122`), 64 bytes, not truncated.
-- Its key is derived with HKDF-SHA512 from the tenant master key and the context
-  `hyperswitch-card-vault/card-dedup/v1` (`src/crypto/hash_manager/managers/sha.rs:82` and
-  `:93-108`), so it is independent of the keys that encrypt the cards, and two tenants with
-  different master keys get different keys. Under the `key_custodian` feature, the vault cannot compute it before both custodians have
-  unlocked the master key.
+  (`src/crypto/hash_manager/managers/sha.rs:142-145`), 64 bytes, not truncated.
+- Its key is derived with HKDF-SHA512 from the tenant master key, the context
+  `hyperswitch-card-vault/card-dedup/v2` (`src/crypto/hash_manager/managers/sha.rs:83`) and the
+  merchant and customer ids of the request, each preceded by its length
+  (`src/crypto/hash_manager/managers/sha.rs:96-130`). It is independent of the keys that encrypt the
+  cards, and two tenants with different master keys get different keys. Under the `key_custodian`
+  feature, the vault cannot compute it before both custodians have unlocked the master key.
 - Someone who reads `hash_table` alone can no longer test candidate card numbers against it: they
   would need the master key. Tests: `card_dedup_two_master_keys_give_two_hashes` and
   `hmac_sha512_matches_rfc4231_case_2` (`src/crypto/hash_manager/managers/sha.rs`), and, against a
-  real database, `stored_card_hash_is_not_a_plain_sha512` and
-  `same_card_for_two_merchants_shares_one_hash_row` (`tests/vault_e2e.rs`).
-- The duplicate check still spans one tenant and all its merchants, as before.
+  real database, `stored_card_hash_is_not_a_plain_sha512` (`tests/vault_e2e.rs`).
+- The same card stored by two merchants, or by two customers of one merchant, gets two different
+  hashes and two `hash_table` rows, so the `hash_id` of their `locker` rows no longer links them.
+  `duplication_check` is still returned only when the same merchant and customer add the same card
+  again, for cards whose hash was written after this change (older rows: see below). Tests: `card_dedup_two_merchants_give_two_hashes`,
+  `card_dedup_two_customers_give_two_hashes`, `card_dedup_scope_framing_is_unambiguous`, and
+  `same_card_for_two_merchants_gets_two_hash_rows` (`tests/vault_e2e.rs`).
+- An add of a card known only to another merchant or customer now takes the same code path as a
+  card the tenant has never seen: its hash is not in the table, so a new row is inserted. Proven by
+  `card_known_to_others_takes_the_new_card_path`, which compares the rows each add creates: the
+  branch for a known hash, which inserts no hash row, did not run. A read that writes no row would
+  not be seen by this test, and the response time itself is not measured.
+- One different path remains: when the same merchant and customer stored a card, deleted it and add it
+  again, the hash row is found, because a delete removes the `locker` row and keeps the `hash_table`
+  row (read in the code, `src/storage/db.rs:264-307`, not tested). Their response time may differ,
+  but it can only tell them about their own past adds.
 
 ## What the vault does not do
 
@@ -122,6 +136,13 @@ describes it, in the [threat model table](./threat-model.md).
   are deleted. This fork holds no real card, so no migration is provided; a real deployment would
   need a one-off job that decrypts each stored card, recomputes the keyed hash and deletes the old
   values.
+- **Rows written before the merchant scope are not converted either.** Hashes stored under the
+  tenant-wide `v1` context are never matched by the `v2` lookup (test
+  `tenant_wide_v1_hash_row_is_not_matched`). So a card stored before the change and added again by
+  the same merchant and customer gets a second stored copy, without `duplication_check`, and the
+  old `locker` rows keep their shared `hash_id`, which still links merchants and customers until
+  those rows are deleted. No migration is provided here; a reusable re-hash job, also needed after a
+  change of master key, is the planned next step.
 - **The master key must stay a real secret even with an external key manager.** With the
   `external_key_manager` feature enabled, the cards are encrypted by the external service
   (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it
