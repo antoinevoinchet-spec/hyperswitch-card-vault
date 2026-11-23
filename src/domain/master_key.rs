@@ -85,6 +85,22 @@ pub async fn rotate(
     .await
 }
 
+/// Records a run refused before it could start (input that does not unlock a key, a new key of the
+/// wrong length), and returns the error to report: the refusal, or the audit write's own error.
+pub async fn record_refused_run(
+    state: &TenantAppState,
+    refusal: ContainerError<error::ApiError>,
+) -> ContainerError<error::ApiError> {
+    audit::record(
+        &state.db,
+        audit::master_key_rotation_run_audit(&state.config.tenant_id),
+        Err::<(), _>(refusal),
+    )
+    .await
+    .err()
+    .unwrap_or_else(|| error::ApiError::UnknownError.into())
+}
+
 async fn rotate_rows(
     state: &TenantAppState,
     former_master_key: &Secret<Vec<u8>>,

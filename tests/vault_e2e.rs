@@ -1988,8 +1988,17 @@ async fn rotation_resumed_after_interruption_matches_a_full_run() {
 
     let state_full = canonical(&full, &former_raw, &new_raw, &before[0].0, &before[0].1);
     let state_resumed = canonical(&resumed, &former_raw, &new_raw, &before[1].0, &before[1].1);
+    let wrong = [
+        "new=false",
+        "former=true",
+        "same_key=false",
+        "same_data=false",
+        "hash_ok=false",
+    ];
     assert!(
-        state_full.iter().all(|line| !line.contains("=false")),
+        state_full
+            .iter()
+            .all(|line| wrong.iter().all(|bad| !line.contains(bad))),
         "the full run did not reach the expected state: {state_full:?}"
     );
     assert_eq!(state_full, state_resumed);
