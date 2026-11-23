@@ -131,7 +131,8 @@ impl MerchantInterface for Storage {
             .limit(limit);
 
         let pool = conn.pool();
-        let operation = DbOperation::Filter;
+        // `Filter` exists only with `external_key_manager`; the re-hash batch read uses `FindOne`.
+        let operation = DbOperation::FindOne;
         super::log_db_query::<<types::MerchantInner as HasTable>::Table, _>(
             &query, operation, pool,
         );
@@ -171,12 +172,13 @@ impl MerchantInterface for Storage {
             &query, operation, pool,
         );
 
-        let output = super::record_db_query_rows::<<types::MerchantInner as HasTable>::Table, _, _>(
-            query.execute_async(conn.get()),
-            operation,
-            pool,
-        )
-        .await?;
+        let output =
+            super::record_db_query_rows::<<types::MerchantInner as HasTable>::Table, _, _>(
+                query.execute_async(conn.get()),
+                operation,
+                pool,
+            )
+            .await?;
         Ok(output)
     }
 }

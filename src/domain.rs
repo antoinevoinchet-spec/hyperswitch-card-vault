@@ -8,6 +8,7 @@
 pub mod fingerprint;
 pub mod hash;
 pub mod locker;
+pub mod master_key;
 pub mod merchant;
 pub mod vault;
 
