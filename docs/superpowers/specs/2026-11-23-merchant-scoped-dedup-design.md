@@ -1,8 +1,7 @@
 # Merchant-scoped duplicate-check hash (I6): design
 
-Date: 2026-11-23. Branch: `feat/merchant-scoped-dedup` (from `main`, `dcbe7c1`). Status: draft;
-decisions S1 (merchant and customer) and S2 (no migration in I6) taken by the owner; S3 not taken
-yet.
+Date: 2026-11-23. Branch: `feat/merchant-scoped-dedup` (from `main`, `dcbe7c1`). Status: decisions S1, S2
+and S3 taken by the owner; plan in `docs/superpowers/plans/2026-11-23-merchant-scoped-dedup.md`.
 
 ## Intent
 
@@ -72,10 +71,17 @@ A per-merchant scope is therefore the common default, not an unusual restriction
   `duplication_check` = `duplicated` and creates no extra row.
   Verifiable by: the e2e test that replaces `same_card_for_two_merchants_shares_one_hash_row`, run
   with `VAULT_TEST_REQUIRE_DB=1`; it fails on `main` (one row instead of two).
-- **D7** (T25, depends on S1 and S3) End to end: an add of a card known only to another merchant
-  (and, if S1 = A, another customer of the same merchant) inserts a new `hash_table` row, so it
-  takes the same code path as a card the tenant has never seen.
-  Verifiable by: e2e test counting `hash_table` rows before and after that add; it fails on `main`.
+- **D7** (T25, S3) End to end, paired: the add of a card the tenant has never seen and the add of
+  the same card when it is known only to another merchant, then only to another customer of the
+  same merchant, each create exactly the same rows (one `hash_table` row, one `locker` row) and
+  return no `duplication_check`. Equal row changes show that the "hash found" branch, which inserts
+  no `hash_table` row, did not run.
+  Verifiable by: one e2e test comparing the row changes of each pair; it fails on `main`.
+- **D7b** (T25, S3, rows of older deployments) A `v1` hash row of the same card, written directly
+  into `hash_table` by the test as an older deployment would have left it, is not matched: the add
+  still creates its own `hash_table` row.
+  Verifiable by: one e2e test that computes the `v1` value with `ring` in the test; it fails on
+  `main`, where the `v1` row is found.
 - **D8** The stored value is still the keyed hash recomputed from the unlocked master key, now with
   the scope.
   Verifiable by: `stored_card_hash_is_not_a_plain_sha512`, adapted to pass the scope.
@@ -134,7 +140,8 @@ Every value stored under `v1` is tenant-wide. After the change, no lookup can ma
 - The old `locker` rows keep their shared `hash_id`, so the link of T24 stays readable for them
   until they are deleted. The old `hash_table` rows stay too; they are keyed, so they reveal no card
   number.
-- Cached copies (Redis, in-memory) expire with their TTL and are never hit again.
+- Cached copies (Redis, in-memory): their behaviour is described in `docs/tokenization.md` only
+  after the cache code has been read.
 - A real deployment would need a one-off job that decrypts each `locker` row, recomputes the scoped
   hash, gives the row its own `hash_table` row, then deletes the old rows. Not written here unless
   the owner decides otherwise (S2).
@@ -158,8 +165,16 @@ Every value stored under `v1` is tenant-wide. After the change, no lookup can ma
   `proven` for rows written after the change.
 - New row T28 (`open`): rows written before the change keep the shared `hash_id` (link of T24) and
   are not matched any more (duplicate not detected); evidence = the `docs/tokenization.md` lines.
-- T25: depends on S1 and S3 (see the decisions below).
+- T25: reworded to what is proven: the response time of an add tells whether *another* merchant or
+  customer stored the card. Control: the scoped derivation; evidence: the D7 and D7b tests; status
+  `proven`, and the row says that the code path is proven, not a measured duration.
+- New row T29 (`open`): the same merchant and customer who stored a card, deleted it and add it
+  again take a shorter path (hash row found, kept by the delete); they learn only their own past.
+  Evidence: the `docs/tokenization.md` lines that describe it.
 - T21, T22: wording reread; only their `docs/tokenization.md` line ranges may move.
+- The "How to check it yourself" line that lists the rows with end-to-end evidence, and the earlier
+  `README.md` entry that names the replaced test, are updated so that no text cites a test that no
+  longer exists.
 
 ## Decisions for the owner
 
@@ -174,9 +189,15 @@ Every value stored under `v1` is tenant-wide. After the change, no lookup can ma
   against PostgreSQL, usable both for `v1` to `v2` (closes T28) and after a master key change
   (closes T22). Writing that job inside I6 was rejected: it doubles the ticket and mixes two risky
   reviews (key derivation, and code that reads every card and deletes rows).
-- **S3** T25: **A, prove the code path end to end (D7), keep "time not measured" written in the
-  row** (recommended) or **B, add `tacet` as a development dependency and measure** (new dependency,
-  timing tests on shared CI machines) or **C, leave T25 `open` as it is**.
+- **S3** T25: **prove the code path end to end, paired, including a `v1` row; reword T25 to the
+  cross-party oracle; keep "duration not measured" in the row; put the own-history path on its own
+  `open` row** (owner, 2026-11-23; option A, refined by the owner's research note of the same day on
+  this decision, kept outside the repository). Rejected: B, the `tacet` crate as a development
+  dependency (it targets in-memory functions at nanosecond scale, not HTTP calls to a database;
+  needs elevated rights on macOS; no independent validation found), and C, leaving T25 `open` (it
+  would describe a leak the code no longer has). Deferred: comparing the SQL statements run in each
+  scenario with `pg_stat_statements`, which needs a change to the CI database job (`.github/` is out
+  of scope for this ticket).
 
 ## Left to the builder
 
