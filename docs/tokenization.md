@@ -211,7 +211,9 @@ describes it, in the [threat model table](./threat-model.md).
   After the last row, every row must open under the new key and none under the former one, before
   the hash step runs (`src/domain/master_key.rs:152-153`). Tests (`tests/vault_e2e.rs`):
   `rotation_cards_read_back_for_two_merchants`, `rotation_former_key_opens_no_merchant_row`,
-  `rotation_keeps_duplicate_detection`, `rotation_resumed_after_interruption_matches_a_full_run`.
+  `rotation_keeps_duplicate_detection`, `rotation_resumed_after_interruption_matches_a_full_run`
+  (runs stopped by a row limit and finished from a mixed state, and a run killed before the hash
+  step, each compared with a complete run).
 - **How to run it.** Stop the vault and back up the database. Generate the new key with
   `utils master-key`. Run the command: the keys are read from standard input, one per line, never
   from arguments (`src/bin/utils.rs:327-335`). With the `key_custodian` feature, the current
@@ -228,9 +230,10 @@ describes it, in the [threat model table](./threat-model.md).
   under a third key, and a batch size below 1: each changes no row. Tests:
   `rotation_refuses_wrong_custodian_keys`, `rotation_refuses_the_same_master_key`,
   `rotation_refuses_a_row_under_a_third_key`, `rotation_refuses_a_batch_size_of_zero`.
-- **What the audit log keeps of it.** One `master_key_rotation_row` entry per rewritten row, with the
-  merchant id only, written before the row changes, and one `master_key_rotation_run` entry per run
-  with its outcome, a refused run included; the re-hash step writes its own entries. No entry and
+- **What the audit log keeps of it.** One `master_key_rotation_row` entry per row to rewrite, with
+  the merchant id only, written before the row changes (it records the attempt, as for the re-hash
+  job), and one `master_key_rotation_run` entry per run with its outcome, a refused run included (the
+  only row a refused run adds); the re-hash step writes its own entries. No entry and
   no output holds a key, a key part, a merchant key or a hash. If an entry cannot be written, the
   run stops and the row it was about to change is unchanged. Tests:
   `rotation_audit_and_output_hold_no_key`, `rotation_stops_when_audit_table_is_unwritable`.
@@ -241,7 +244,9 @@ describes it, in the [threat model table](./threat-model.md).
   read only with the former key, so it must be kept outside the vault until they expire, then
   destroyed; this fork writes no tool for either step. Between the end of the command and the
   configuration change, a vault started with the former key reads no card; a vault started while a
-  run is stopped half-way reads only the cards of merchants not yet rewritten.
+  run is stopped half-way reads only the cards of merchants not yet rewritten. A vault left running
+  during the rotation can create a merchant under the former key after the final check, which the
+  command does not see. The vault must be stopped for the whole run.
 - **Modes.** The tests run with and without the `key_custodian` feature (CI job "Master key
   rotation without the key_custodian feature"). With `kv`, the command refuses before any write
   (test `rotation_refuses_to_run_with_kv`, CI job "Master key rotation refusal with the kv
