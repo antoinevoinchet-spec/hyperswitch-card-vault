@@ -102,18 +102,19 @@ describes it, in the [threat model table](./threat-model.md).
   real database, `stored_card_hash_is_not_a_plain_sha512` (`tests/vault_e2e.rs`).
 - The same card stored by two merchants, or by two customers of one merchant, gets two different
   hashes and two `hash_table` rows, so the `hash_id` of their `locker` rows no longer links them.
-  `duplication_check` is unchanged: it was, and still is, returned only when the same merchant and
-  customer add the same card again. Tests: `card_dedup_two_merchants_give_two_hashes`,
+  `duplication_check` is still returned only when the same merchant and customer add the same card
+  again, for cards whose hash was written after this change (older rows: see below). Tests: `card_dedup_two_merchants_give_two_hashes`,
   `card_dedup_two_customers_give_two_hashes`, `card_dedup_scope_framing_is_unambiguous`, and
   `same_card_for_two_merchants_gets_two_hash_rows` (`tests/vault_e2e.rs`).
 - An add of a card known only to another merchant or customer now takes the same code path as a
   card the tenant has never seen: its hash is not in the table, so a new row is inserted. Proven by
-  `card_known_to_others_takes_the_new_card_path`, which compares the rows each add creates. The
-  code path is proven; the response time itself is not measured.
-- One shorter path remains: when the same merchant and customer stored a card, deleted it and add it
+  `card_known_to_others_takes_the_new_card_path`, which compares the rows each add creates: the
+  branch for a known hash, which inserts no hash row, did not run. A read that writes no row would
+  not be seen by this test, and the response time itself is not measured.
+- One different path remains: when the same merchant and customer stored a card, deleted it and add it
   again, the hash row is found, because a delete removes the `locker` row and keeps the `hash_table`
-  row (read in the code, `src/storage/db.rs:264-307`, not tested). Their response time can only tell
-  them about their own past adds.
+  row (read in the code, `src/storage/db.rs:264-307`, not tested). Their response time may differ,
+  but it can only tell them about their own past adds.
 
 ## What the vault does not do
 
