@@ -86,7 +86,8 @@ None of them settles where such a job should run.
   state keyed by fixed card references.
 - **D6** The job writes `audit_log` rows with metadata only (tenant, operation, merchant, customer,
   card reference, outcome), never a card number, a hash value or a key; one row per changed
-  `locker` row, written before the change, and one row per run.
+  `locker` row, written before the change (it records the attempt), and one row per run (it
+  records the result).
   Verifiable by: e2e test reading every `audit_log` row as text and checking that none contains the
   card number, the hex of any hash, the master key or either custodian key.
 - **D7** If an audit row cannot be written, the job stops with an error and the row it was about

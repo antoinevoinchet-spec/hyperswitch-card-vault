@@ -27,7 +27,11 @@ decisions W1 = B, W2 = A, W3 = A).
 - Two files outside the owner's modifiable list, each a one-line visibility change, are touched
   only after the owner's explicit approval (Task 0): `src/routes/key_custodian.rs`
   (`aes_decrypt_custodian_key` becomes `pub`) and `src/routes/data.rs` (`mod transformers` becomes
-  `pub(crate) mod transformers`, so the job reuses `get_hash`). Without approval, stop and ask.
+  `pub(crate) mod transformers`, so the job reuses `get_hash`). Any other file outside the list
+  (for example `src/lib.rs`, `src/domain.rs`, `src/routes.rs`, `src/routes/data/types.rs`) means:
+  stop and ask. Checked on 2026-11-23: `domain::hash`, `routes::key_custodian`,
+  `routes::data::types::StoredData`, `storage::GlobalStore`, `api_client::ApiClient` and
+  `runtime_config::RuntimeConfigManager` are already public, so `utils.rs` needs nothing else.
 - The decrypted card stays in memory inside `StrongSecret`; no `logger` call, output line or error
   message takes decrypted data, a hash value or a key. Custodian keys are read from standard input,
   never from arguments.
@@ -61,8 +65,11 @@ decisions W1 = B, W2 = A, W3 = A).
    batches, and test 1 checks `examined: 4`.
 5. A concurrent change of a row between read and update (0 rows updated): the job stops with an
    error rather than count it as moved. Code only (`hash_id = old` condition); not tested, since it
-   needs a concurrent writer; listed in the final report. Likewise the refusal under `kv` is only
-   compiled (`--all-features`), not tested.
+   needs a concurrent writer; listed in the final report. Also listed there as not tested: the
+   refusal under `kv` (only compiled with `--all-features`); the path without `key_custodian`
+   (master key from the configuration; only compiled with default features); the cache
+   invalidation of deleted hash rows (the tests restart the vault around each run, as the design
+   recommends); the order "balance check before clean-up".
 
 ---
 
@@ -74,8 +81,14 @@ decisions W1 = B, W2 = A, W3 = A).
   `git merge-base --is-ancestor d914a8b feat/rehash-job; echo $?` -> `0`.
 - [ ] **Step 2**: `git status --porcelain` empty and `git log --oneline main..HEAD -- docs/superpowers`
   lists the design and plan commits.
-- [ ] **Step 3**: the owner has approved the two one-line visibility changes of Global
-  Constraints (stop point 3 of the request). If not, stop.
+- [ ] **Step 2b**: create `<scratchpad>/forbidden.txt` (the terms `CLAUDE.md` forbids, one fixed
+  string per line) and check `test -s` on it; every later search runs
+  `grep -i -F -f <scratchpad>/forbidden.txt ...; echo $?` and accepts only exit 1 (no match), exit 2
+  being an error.
+- [ ] **Step 2c**: record the starting counts: `cargo test -j 4` (expected 41 passed) and the full
+  e2e command (expected 8 passed); the thresholds of Tasks 5 and 8 are these plus the new tests.
+- [x] **Step 3**: the owner has approved the two one-line visibility changes of Global
+  Constraints (stop point 3 of the request): approved on 2026-11-23.
 
 ### Task 1: End-to-end tests that fail on `main`
 
@@ -95,9 +108,11 @@ decisions W1 = B, W2 = A, W3 = A).
     `env!("CARGO_BIN_EXE_utils") rehash --tenant public --batch-size 2 <args>` with the same
     `LOCKER__DATABASE__*` and `LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY` variables as
     `Vault::start`, current dir `CARGO_MANIFEST_DIR`, writes `key1\n<key2>\n` to standard input,
-    returns the exit code and standard output plus standard error joined.
+    returns the exit code and standard output plus standard error joined. It kills the process and
+    panics with "rehash timed out" after 120 s.
   - `fn expected_hash(master_key: &[u8], merchant: &str, customer: &str, hashed: &str) -> Vec<u8>`
-    (`CardDedupHmac` over `serde_json::to_vec(hashed)`).
+    (`CardDedupHmac` over `serde_json::to_vec(hashed)`; `get_hash` serialises both the card number
+    and the `enc_card_data` string this way, read in `src/routes/data/transformers.rs:83-104`).
   - `fn seed_v1(db: &TestDb, master_key: &[u8], groups: &[(&str, &str, &[&str])])`: deletes every
     `hash_table` row; for each group `(hash_id, hashed, locker_ids)` inserts
     `(hash_id, <v1 hash of hashed>, created_at '2000-01-01')` and points those `locker` rows at it
@@ -131,8 +146,10 @@ decisions W1 = B, W2 = A, W3 = A).
      expected hash; `ref-old`'s `hash_id` differs from `ref-new`'s and `hash_of` it is `None`; no
      `legacy-v1`; restart, unlock: retrieve `ref-old` and `ref-new` both 200 with the card number;
      a third add -> `duplicated`, `count("locker") == 2`.
-  3. `rehash_twice_changes_nothing`: the data set of test 2 plus (M2, C1); run once (exit 0),
-     `snapshot` and `audit_rows().len()`; run again (exit 0); `snapshot` equal; exactly one new
+  3. `rehash_twice_changes_nothing`: the data set of test 2 plus (M2, C1); run once (exit 0); age
+     every `hash_table` row (`UPDATE hash_table SET created_at = '2000-01-01'`), so the final
+     clean-up of the second run sees cited rows older than its margin; then `snapshot` and
+     `audit_rows().len()`; run again (exit 0); `snapshot` equal; exactly one new
      audit row, `("rehash_run", "success", 200)`, and no new `rehash_row`; second output has
      `moved: 0`, `duplicates: 0`, `removed hash rows: 0`.
   4. `rehash_resumed_after_interruption_matches_a_full_run`: two databases, one `Keys`, data set
@@ -226,7 +243,8 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
 
 - [ ] **Step 1: Implement** the five methods (exercised by Task 1's tests once Tasks 4 and 5 land).
 - [ ] **Step 2: Run** `cargo build -j 4 --features key_custodian` and
-  `cargo clippy -j 4 --all-features --all-targets` -> exit 0, no new warning compared with `main`.
+  `cargo clippy -j 4 --all-features --all-targets` -> exit 0; the only new warnings allowed are
+  dead-code warnings for the five methods, which Task 4 uses (none may remain after Task 4).
 - [ ] **Step 3: Commit** `feat: add storage primitives for the re-hash job`.
 
 ### Task 4: The job
@@ -289,7 +307,7 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
 - Produces: subcommand `rehash` with `--tenant <id>` (required), `--batch-size <n>` (internal,
   default 100), `--max-rows <n>` (optional).
   - Under `key_custodian`: reads two lines (key 1, key 2) from standard input and unlocks the
-    master key with `aes_decrypt_custodian_key` (a wrong key -> exit 1).
+    master key with `aes_decrypt_custodian_key` (a wrong key -> exit 1). It never echoes them.
   - Without `key_custodian`: uses `tenant_secrets.master_key` from the configuration, as the vault
     does at start-up (`GlobalAppState::new`).
   - Output, one per line: `examined: N`, `current: N`, `moved: N`, `duplicates: N`,
@@ -319,16 +337,19 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
 | Breakage | Test expected to fail |
 |---|---|
 | merchant id replaced by `""` in the job's `CardDedupHmac` call | `rehash_moves_v1_rows_to_scoped_hashes` |
+| customer id replaced by `""` in the same call | `rehash_moves_v1_rows_to_scoped_hashes` |
+| `EncData` rebuilt as an empty `enc_card_data` | `rehash_moves_v1_rows_to_scoped_hashes` (`ref-enc`) |
 | no `delete_hash_if_unused` and no final clean-up | `rehash_moves_v1_rows_to_scoped_hashes` |
 | `NOT EXISTS` removed from `delete_hash_if_unused` | `rehash_resumed_after_interruption_matches_a_full_run` (`legacy-v1` gone after one row) |
-| `id > after_id` replaced by `id >= after_id` | `rehash_moves_v1_rows_to_scoped_hashes` (`examined: 4`) |
+| `NOT EXISTS` removed from `delete_unused_hashes_before` | `rehash_twice_changes_nothing` (aged, cited rows deleted) |
+| `id > after_id` replaced by `id >= after_id` | `rehash_moves_v1_rows_to_scoped_hashes` (fails by "rehash timed out" or on `examined: 4`) |
 | "detached earlier" check removed | `rehash_twice_changes_nothing` |
 | duplicate branch skipped (row left on its old hash) | `rehash_detaches_the_older_duplicate` |
 | "current" decided by existence of the cited row only | `rehash_converges_rows_hashed_under_another_master_key` |
-| `insert_or_get` replaced by `insert_hash` | `rehash_resumed_after_interruption_matches_a_full_run` |
+| an existing target row ignored, `insert_hash` always called | `rehash_resumed_after_interruption_matches_a_full_run` (crash state 1: duplicate key, exit 1) |
 | audit error ignored (`let _ =`) | `rehash_stops_when_audit_table_is_unwritable` |
 | row audit written after the move instead of before | `rehash_stops_when_audit_table_is_unwritable` |
-| merchant id replaced by the card number in `rehash_row_audit`'s resource | `rehash_audit_rows_hold_no_card_or_key` |
+| `rehash_row_audit`'s resource set to the decrypted data as text (`opaque-test-value` is not card-shaped, so it is not redacted) | `rehash_audit_rows_hold_no_card_or_key` |
 | decrypted card printed in the output | `rehash_moves_v1_rows_to_scoped_hashes` |
 | `check_balance` always `Ok` | `report_balance_rejects_mismatched_counts` |
 | margin of the final clean-up set to 0 s | `rehash_on_an_empty_tenant_changes_nothing` |
@@ -345,8 +366,11 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
 
 - [ ] **Step 1**: `docs/tokenization.md`: replace the "not converted either" paragraph by what the
   job does, how to run it (stop the vault, run, restart), what stays (two copies of a detached
-  duplicate; live-run effects; rotation not implemented); update the T29 paragraph (the clean-up
-  removes kept hash rows of deleted cards); correct every moved `file:line`.
+  duplicate; live-run effects; rotation not implemented); how custodians give their keys (piped
+  from a file only they can read, or typed with echo off, never as an argument, so they stay out
+  of the screen and the shell history); that a `rehash_row` entry records the attempt, written
+  before the change, and `rehash_run` the result; update the T29 paragraph (the clean-up removes
+  kept hash rows of deleted cards); correct every moved `file:line`.
 - [ ] **Step 2**: `docs/threat-model.md`: T28 `proven` (control: the job's lines in
   `src/domain/hash.rs`; evidence: tests 1 to 6 of Task 1; the row says the job must be run); T22
   stays `open` (evidence adds `rehash_converges_rows_hashed_under_another_master_key` and the
@@ -354,7 +378,8 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
   duplicate during the run, cached deleted row); "How to check it yourself" e2e list updated;
   every `file:line` reread.
 - [ ] **Step 3**: `README.md`: new entry under "Changes from the original" listing every file of
-  `git diff --name-only main` except `README.md`.
+  `git diff --name-only main` except `README.md`; reread the earlier entries (I6 says "older rows
+  are not converted") and add, in the new entry, that the re-hash job now converts them.
 - [ ] **Step 4: Run** `scripts/check-threat-model.sh` before (today: `OK: 29 rows (13 proven, 6 not tested, 10 open)`)
   and after; expected after: 30 rows, 14 proven (T28 added), 6 not tested, 10 open (T28 removed,
   T30 added); `grep -c -i -E 'GHSA|advisories' docs/threat-model.md README.md docs/tokenization.md`
@@ -365,7 +390,8 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
 
 **Covers:** D12, D13, owner's completion criteria K7 to K18
 
-- [ ] **Step 1**: `cargo fmt --all --check`, `cargo clippy -j 4 --all-features --all-targets`
+- [ ] **Step 1**: `cargo fmt --all --check` (stable, exit 0; the nightly check runs only in CI),
+  `cargo clippy -j 4 --all-features --all-targets`
   (compared with `main`), `cargo test -j 4`, full e2e, `make demo` with `DEMO_DATABASE_URL` to an
   empty database of the cluster -> `DEMO OK`.
 - [ ] **Step 2**: `grep -i -F -f <scratchpad>/forbidden.txt` on the added lines of `git diff main`
@@ -374,8 +400,9 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
   -> empty; every file of `git diff --name-only main` named in `README.md`.
 - [ ] **Step 3**: `security-review` skill on the branch; a fresh `opus` reviewer and
   `second-avis --reserve 50` in parallel, each given the owner's request verbatim, the diff and the
-  table, and asked to check that each added test fails if its control is removed. Fixes, if any,
-  go through the same tests (cluster re-created if removed).
+  table, and asked to check that each added test fails if its control is removed. If a fix
+  changes any file: rerun the tests touched, then Steps 1 and 2, `scripts/check-threat-model.sh`
+  and the README list check (cluster re-created if removed).
 - [ ] **Step 4**: stop, DOING / EXPECT / IF WRONG, ask to push:
   `git push -u origin feat/rehash-job` (`origin` = `antoinevoinchet-spec/hyperswitch-card-vault`,
   checked with `git remote get-url origin`).
@@ -383,5 +410,7 @@ Expected: 9 failed, each on the first `run_rehash` exit-code assertion (unknown 
   -> no match; stop, show them, ask; then
   `gh pr create -R antoinevoinchet-spec/hyperswitch-card-vault --base main --head feat/rehash-job`.
 - [ ] **Step 6**: `gh pr checks <n> -R antoinevoinchet-spec/hyperswitch-card-vault --watch`;
-  `gh pr list -R juspay/hyperswitch-card-vault --author antoinevoinchet-spec --state all` -> no row;
+  `gh pr list -R juspay/hyperswitch-card-vault --author antoinevoinchet-spec --state all` -> no row
+  (a read, required verbatim by the owner's completion criteria; `CLAUDE.md` forbids writing to
+  `juspay/*`, which this does not);
   `git status --porcelain` empty; cluster removed.
