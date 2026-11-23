@@ -1,7 +1,8 @@
 # Merchant-scoped duplicate-check hash (I6): design
 
 Date: 2026-11-23. Branch: `feat/merchant-scoped-dedup` (from `main`, `dcbe7c1`). Status: draft;
-decision S1 taken by the owner (merchant and customer); S2 and S3 not taken yet.
+decisions S1 (merchant and customer) and S2 (no migration in I6) taken by the owner; S3 not taken
+yet.
 
 ## Intent
 
@@ -167,8 +168,12 @@ Every value stored under `v1` is tenant-wide. After the change, no lookup can ma
   also between customers of one merchant and leaves no T25 branch about others; it loses nothing a
   caller sees, since `duplicated` is already only reported for the same merchant and customer. Cost:
   one `hash_table` row per card, merchant and customer instead of per card and tenant.
-- **S2** rows written under `v1`: **A, no migration, documented** (recommended; the fork holds no
-  real card, and migrations are out of scope) or **B, write the one-off conversion job**.
+- **S2** rows written under `v1`: **no migration in I6, documented** (owner, 2026-11-23; option A).
+  The fork holds no real card, and migrations are out of scope. The next ticket, before the hygiene
+  ticket, is a reusable re-hash job: resumable, idempotent, recorded in the audit log, tested
+  against PostgreSQL, usable both for `v1` to `v2` (closes T28) and after a master key change
+  (closes T22). Writing that job inside I6 was rejected: it doubles the ticket and mixes two risky
+  reviews (key derivation, and code that reads every card and deletes rows).
 - **S3** T25: **A, prove the code path end to end (D7), keep "time not measured" written in the
   row** (recommended) or **B, add `tacet` as a development dependency and measure** (new dependency,
   timing tests on shared CI machines) or **C, leave T25 `open` as it is**.
