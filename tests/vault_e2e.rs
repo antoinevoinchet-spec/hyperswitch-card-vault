@@ -1474,6 +1474,40 @@ async fn rehash_refuses_a_batch_size_of_zero() {
     );
 }
 
+/// Under `kv`, every storage call of the re-hash job refuses to run: the job must stop before any
+/// change. No vault is started (built with `kv`, it needs a Redis); the one unused, old hash row is
+/// what a working job would delete in its clean-up.
+#[cfg(feature = "kv")]
+#[tokio::test]
+async fn rehash_refuses_to_run_with_kv() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    insert_hash_row(&db, "orphan-v1", &random_bytes(64), "'2000-01-01'");
+    let before = db.snapshot();
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+
+    assert_eq!(code, 1, "rehash must refuse to run under kv");
+    // The first storage call, the read of the locker rows, refuses with this error kind.
+    assert!(
+        output.contains("rehash failed: RetrieveDataFailed"),
+        "not the refusal of the job's first storage call"
+    );
+    assert!(db.snapshot() == before, "a row changed under kv");
+    let rehash: Vec<_> = db
+        .audit_rows()
+        .into_iter()
+        .filter(|row| row.operation.starts_with("rehash_"))
+        .map(|row| (row.operation, row.outcome))
+        .collect();
+    assert_eq!(
+        rehash,
+        [("rehash_run".to_string(), "failure".to_string())],
+        "the job itself must run and record its refusal, with no clean-up entry"
+    );
+}
+
 #[tokio::test]
 async fn rehash_keeps_the_newer_copy_after_a_key_change() {
     let Some(admin) = admin_url() else { return };
