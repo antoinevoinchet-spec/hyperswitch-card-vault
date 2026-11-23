@@ -36,7 +36,7 @@ describes it, in the [threat model table](./threat-model.md).
 ### `card_reference` is a reversible, non-cryptographic token
 
 - `/data/add` stores the card and answers with a `card_reference` instead of the card. Unless the
-  caller supplies its own reference, the vault generates it (`src/storage/types.rs:160-163`) as a
+  caller supplies its own reference, the vault generates it (`src/storage/types.rs:178-181`) as a
   UUID v7 (`src/storage/utils.rs:8-9`): a timestamp plus random bits, with no mathematical
   relationship to the card number.
 - The reference is returned to the caller from the stored row (`src/routes/data/transformers.rs:19`).
@@ -114,7 +114,7 @@ describes it, in the [threat model table](./threat-model.md).
   not be seen by this test, and the response time itself is not measured.
 - One different path remains: when the same merchant and customer stored a card, deleted it and add it
   again, the hash row is found, because a delete removes the `locker` row and keeps the `hash_table`
-  row (read in the code, `src/storage/db.rs:264-307`, not tested). Their response time may differ,
+  row (read in the code, `src/storage/db.rs:327-370`, not tested). Their response time may differ,
   but it can only tell them about their own past adds. The re-hash job's clean-up deletes such kept
   rows of cards deleted before it runs; a delete after the job keeps its hash row again.
 
@@ -125,9 +125,9 @@ describes it, in the [threat model table](./threat-model.md).
 - **No reversible cryptographic token.** The reference is not derived from the card by encryption;
   the vault always looks the card up in its table.
 - **A caller-chosen reference is not checked.** `requestor_card_reference`
-  (`src/routes/data/types.rs:52`) is stored as given (`src/storage/types.rs:160-162`), so a caller
+  (`src/routes/data/types.rs:52`) is stored as given (`src/storage/types.rs:178-180`), so a caller
   could choose a reference that looks like a card number. The audit log replaces such an id by
-  `redacted` (`looks_like_card_number`, `src/audit.rs:72`; test `pending_redacts_card_shaped_ids`),
+  `redacted` (`looks_like_card_number`, `src/audit.rs:76`; test `pending_redacts_card_shaped_ids`),
   but the vault itself stores it. As a side effect, about one in ten purely numeric ids of 13 to 19
   digits also passes the Luhn check and is redacted in the audit log (review note M1).
 - **Rows written before the keyed hash are converted only once the re-hash job has run.** Until
@@ -146,8 +146,8 @@ describes it, in the [threat model table](./threat-model.md).
 - **The re-hash job.** `utils rehash --tenant <id>` (`src/bin/utils.rs`, job in
   `src/domain/hash.rs`) decrypts each stored card, recomputes the hash that `/data/add` computes
   today, points the `locker` row at it, deletes each old hash row that no row cites any more
-  (`src/storage/db.rs:544-546`), and at the end deletes unused rows created more than one minute
-  before the run (`src/storage/db.rs:585-587`). Nothing about progress is stored: each row is
+  (`src/storage/db.rs:607-609`), and at the end deletes unused rows created more than one minute
+  before the run (`src/storage/db.rs:648-650`). Nothing about progress is stored: each row is
   recomputed, so a second run changes nothing and a run stopped half-way is resumed by running it
   again. Tests (`tests/vault_e2e.rs`): `rehash_moves_v1_rows_to_scoped_hashes`,
   `rehash_twice_changes_nothing`, `rehash_resumed_after_interruption_matches_a_full_run`,
@@ -198,12 +198,68 @@ describes it, in the [threat model table](./threat-model.md).
   (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it
   is still required (`src/config.rs:143`) and the duplicate-check key is still derived from it. A
   placeholder or public value there would make the duplicate-check hash computable by anyone again.
-- **A change of master key would change every duplicate-check hash**, since the key is derived from
-  it. The design (`docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md`, decision I3)
-  describes how to keep the current key in that case. Key rotation itself (re-encrypting each
-  merchant key under a new master key) is not implemented. Once it is, the re-hash job brings every
-  hash to the new key, since it needs only the current key (test
-  `rehash_converges_rows_hashed_under_another_master_key`).
+- **Master key rotation.** `utils rotate-master-key --tenant <id>` (`src/bin/utils.rs`, job in
+  `src/domain/master_key.rs`) re-encrypts each merchant key of the tenant under a new master key,
+  then runs the re-hash job under that key, so the duplicate check keeps working (design:
+  `docs/superpowers/specs/2026-11-23-master-key-rotation-design.md`). The merchant keys themselves
+  do not change, so no card is re-encrypted. The AES-GCM tag tells which of the two keys wraps each
+  row (`src/domain/master_key.rs:34-42`): nothing about progress is stored, and a run stopped
+  anywhere is finished by running the command again with the same keys. Before any write, every row
+  is read and must open under the former or the new key; a row under a third key stops the run
+  (`src/domain/master_key.rs:122-132`). Each rewritten row's audit entry comes first, and the update
+  applies only if the row has not changed since it was read (`src/domain/master_key.rs:192-208`).
+  After the last row, every row must open under the new key and none under the former one, before
+  the hash step runs (`src/domain/master_key.rs:152-153`). Tests (`tests/vault_e2e.rs`):
+  `rotation_cards_read_back_for_two_merchants`, `rotation_former_key_opens_no_merchant_row`,
+  `rotation_keeps_duplicate_detection`, `rotation_resumed_after_interruption_matches_a_full_run`
+  (runs stopped by a row limit and finished from a mixed state, and a run killed before the hash
+  step, each compared with a complete run).
+- **How to run it.** Stop the vault and back up the database. Generate the new key with
+  `utils master-key`. Run the command: the keys are read from standard input, one per line, never
+  from arguments (`src/bin/utils.rs:327-335`). With the `key_custodian` feature, the current
+  custodians give the former key 1 and key 2, then the new encrypted master key and the new key 1
+  and key 2 follow; without it, one line holds the new master key. The command prints counts only
+  and exits 0 when done, 2 when `--max-rows` stopped it, 1 on an error, whose message names its kind
+  only. Then put the new encrypted master key in the configuration (the raw key without custodians),
+  start the vault and unlock it with the new custodian keys. `utils rehash`, run with the new keys,
+  checks that the configuration holds the right key: it reports `moved: 0` (asserted by
+  `rotation_keeps_duplicate_detection`).
+- **What it refuses.** Custodian keys that do not unlock their master key, fewer than five lines,
+  a new encrypted master key that the new custodian keys do not open, a new master key equal to the
+  former one (also when only the custodian keys change), a raw new key that is not 32 bytes, a row
+  under a third key, and a batch size below 1: each changes no row. Tests:
+  `rotation_refuses_wrong_custodian_keys`, `rotation_refuses_the_same_master_key`,
+  `rotation_refuses_a_row_under_a_third_key`, `rotation_refuses_a_batch_size_of_zero`.
+- **What the audit log keeps of it.** One `master_key_rotation_row` entry per row to rewrite, with
+  the merchant id only, written before the row changes (it records the attempt, as for the re-hash
+  job), and one `master_key_rotation_run` entry per run with its outcome, a refused run included (the
+  only row a refused run adds); the re-hash step writes its own entries. No entry and
+  no output holds a key, a key part, a merchant key or a hash. If an entry cannot be written, the
+  run stops and the row it was about to change is unchanged. Tests:
+  `rotation_audit_and_output_hold_no_key`, `rotation_stops_when_audit_table_is_unwritable`.
+- **What a rotation covers, and what it does not.** It answers a routine change of master key: a
+  schedule, or a custodian who leaves. It does not answer a leak of the master key together with a
+  copy of the database: the former key and a copy taken before the rotation still give every
+  merchant key, which still decrypts the cards stored today. Copies taken before the rotation can be
+  read only with the former key, so it must be kept outside the vault until they expire, then
+  destroyed; this fork writes no tool for either step. Between the end of the command and the
+  configuration change, a vault started with the former key reads no card; a vault started while a
+  run is stopped half-way reads only the cards of merchants not yet rewritten. A vault left running
+  during the rotation can create a merchant under the former key after the final check, which the
+  command does not see. The vault must be stopped for the whole run.
+- **Modes.** The tests run with and without the `key_custodian` feature (CI job "Master key
+  rotation without the key_custodian feature"). With `kv`, the command refuses before any write
+  (test `rotation_refuses_to_run_with_kv`, CI job "Master key rotation refusal with the kv
+  feature"). With an external key manager, the rotation runs against Juspay's Hyperswitch Encryption
+  Service, built from source at tag `v0.1.14` with no optional feature (test
+  `rotation_with_external_key_manager`, CI job "Master key rotation with an external key manager"):
+  cards stored through the service read back, duplicates are still detected, and a merchant row
+  still waiting for `/key/transfer` opens only under the new key and is then transferred. The keys
+  the service holds are its own and are not rotated by this command.
+- **Not tested.** Two writers changing the same merchant row at once (read in the code: the update
+  then changes no row and the run stops). Two checks are not observable on their own, since another
+  one gives the same result: the five-line check (a missing line does not unlock the key either)
+  and the rotation's own batch size check (the re-hash step refuses a batch size below 1 too).
 - **No per-caller access rules or masking** on retrieval (a later phase of this fork may study
   them).
 - **Custodian unlock before the database role is narrowed.** Since custodian steps are recorded in

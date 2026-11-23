@@ -48,6 +48,27 @@ where
         Ok(output)
     }
 
+    /// Forwarded without caching: the rows hold encrypted keys only.
+    async fn find_merchant_batch(
+        &self,
+        after_id: i32,
+        limit: i64,
+    ) -> Result<Vec<types::EncryptedMerchant>, ContainerError<Self::Error>> {
+        self.inner.find_merchant_batch(after_id, limit).await
+    }
+
+    /// Forwarded without touching the cache: the decrypted merchant key it may hold does not change.
+    async fn update_merchant_enc_key(
+        &self,
+        merchant_id: &str,
+        expected: hyperswitch_masking::Secret<Vec<u8>>,
+        new: hyperswitch_masking::Secret<Vec<u8>>,
+    ) -> Result<usize, ContainerError<Self::Error>> {
+        self.inner
+            .update_merchant_enc_key(merchant_id, expected, new)
+            .await
+    }
+
     #[cfg(feature = "external_key_manager")]
     async fn find_all_keys_excluding_entity_keys(
         &self,

@@ -44,6 +44,24 @@ pub(crate) struct MerchantNewInner {
     enc_key: Encrypted,
 }
 
+/// A `merchant` row as stored: its key is still encrypted under the master key.
+#[derive(Debug, Clone)]
+pub struct EncryptedMerchant {
+    pub id: i32,
+    pub merchant_id: String,
+    pub enc_key: Secret<Vec<u8>>,
+}
+
+impl From<MerchantInner> for EncryptedMerchant {
+    fn from(value: MerchantInner) -> Self {
+        Self {
+            id: value.id,
+            merchant_id: value.merchant_id,
+            enc_key: value.enc_key.into_inner(),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct MerchantNew<'a> {
     pub merchant_id: &'a str,
