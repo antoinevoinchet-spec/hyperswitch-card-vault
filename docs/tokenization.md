@@ -181,10 +181,18 @@ describes it, in the [threat model table](./threat-model.md).
   which a second run handles; the vault's in-memory cache (`src/storage/caching.rs:50-64`) may keep
   a hash row that the clean-up deleted until the vault restarts; an add that reads a deleted
   card's hash row at the moment the clean-up deletes it can store a card citing a missing hash row;
-  and a clock difference between the hosts shortens the one-minute margin. Not tested: the refusal
-  to run with the `kv` feature, a run without the `key_custodian` feature, two writers changing the
-  same row at once (the update then changes no row and the job stops), and the removal of deleted
-  rows from the cache.
+  and a clock difference between the hosts shortens the one-minute margin. Not tested: two writers
+  changing the same row at once (the update then changes no row and the job stops), and the removal
+  of deleted rows from the cache.
+- **The job without `key_custodian`, and under `kv`.** Without the `key_custodian` feature, the
+  command takes the master key from the configuration; the re-hash tests run in that mode too, in
+  the CI job "Re-hash without the key_custodian feature", and give the same result (for example
+  `rehash_moves_v1_rows_to_scoped_hashes`: each row cites its expected hash, a new add returns
+  `duplicated`). With the `kv` feature, the job refuses to run and changes no row (test
+  `rehash_refuses_to_run_with_kv`, CI job "Re-hash refusal with the kv feature"). With no card
+  stored, only two of the six storage calls that refuse under `kv` are on its path (the read of the
+  rows and the final clean-up): the test fails when both refusals are removed, not when only one
+  is. The four refusals on the path of a stored card are compiled, not tested.
 - **The master key must stay a real secret even with an external key manager.** With the
   `external_key_manager` feature enabled, the cards are encrypted by the external service
   (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it

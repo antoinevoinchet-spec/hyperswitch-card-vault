@@ -67,6 +67,15 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/threat-model.md`: T28 proven once the job has run, new evidence for T22 (still open: rotation is not implemented), T21 and T29 wording, new open row T30 (a run next to a live vault), moved line references.
   - `docs/tokenization.md`: describes the job, how to run it, what it leaves, and updated line references.
   - `docs/superpowers/specs/2026-11-23-rehash-job-design.md` and `docs/superpowers/plans/2026-11-23-rehash-job.md`: design and implementation plan.
+- CI hygiene (a check of the dependencies, OpenSSF Scorecard as an unpublished report, and the two re-hash paths that were only compiled):
+  - `deny.toml`: new cargo-deny configuration (known vulnerabilities of the RustSec database, accepted licenses, crates.io and two upstream git repositories as the only sources); the known vulnerabilities of the original code are listed with their reason until 2027-02-21.
+  - `.github/workflows/dependencies.yml`: new workflow running that check on pull requests, on `main` and weekly.
+  - `.github/workflows/scorecard.yml`: new workflow running OpenSSF Scorecard without publishing its results (no badge); the results stay in the run for 5 days.
+  - `.github/workflows/CI-pr.yml`: added the jobs "Re-hash without the key_custodian feature" and "Re-hash refusal with the kv feature"; existing jobs are unchanged.
+  - `tests/vault_e2e.rs`: the end-to-end tests also build without the `key_custodian` feature (the custodian-only tests are left out); new test `rehash_refuses_to_run_with_kv`.
+  - `docs/threat-model.md`: T28 cites the new test and the run without custodians; new rows T31 (dependency check, not tested), T32 to T34 (open); moved line references.
+  - `docs/tokenization.md`: the two re-hash paths are now tested, with the limit of the `kv` test; moved line references.
+  - `docs/superpowers/specs/2026-11-23-hygiene-ci-design.md` and `docs/superpowers/plans/2026-11-23-hygiene-ci.md`: design and implementation plan.
 
 ## Demo
 
