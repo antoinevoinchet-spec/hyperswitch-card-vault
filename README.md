@@ -76,6 +76,17 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/threat-model.md`: T28 cites the new test and the run without custodians; new rows T31 (dependency check, not tested), T32 to T34 (open); moved line references.
   - `docs/tokenization.md`: the two re-hash paths are now tested, with the limit of the `kv` test; moved line references.
   - `docs/superpowers/specs/2026-11-23-hygiene-ci-design.md` and `docs/superpowers/plans/2026-11-23-hygiene-ci.md`: design and implementation plan.
+- Master key rotation (`utils rotate-master-key` re-encrypts every merchant key of a tenant under a new master key, then recomputes every duplicate-check hash under it; it resumes after an interruption, refuses a mix of keys, and is recorded in the audit log; merchant keys and cards are not re-encrypted):
+  - `src/domain/master_key.rs`: new module with the job (read-only check of every merchant row, rewrite with its audit entry first and a conditional update, final check, then the re-hash job), with unit tests.
+  - `src/domain.rs`: registered the module.
+  - `src/bin/utils.rs`: new `rotate-master-key` subcommand; keys read from standard input; prints counts only; a refused input is recorded as a failed run.
+  - `src/storage.rs`, `src/storage/types.rs`, `src/storage/db.rs`, `src/storage/caching/merchant.rs`: storage primitives for the job (merchant rows by cursor, conditional update of a row's encrypted key), forwarded by the cache without caching.
+  - `src/audit.rs`: `master_key_rotation_row` and `master_key_rotation_run` operations, with a unit test.
+  - `tests/vault_e2e.rs`: thirteen end-to-end tests of the rotation (cards read back for two merchants, the former key opens no row, duplicates still detected, resume from a mixed state, wrong custodian keys, the same master key, a row under a third key, audit and output without a key, an unwritable audit table, an empty tenant, a batch size of 0, the `kv` refusal, an external key manager); `Vault::start` now calls a variant that takes extra environment variables.
+  - `.github/workflows/CI-pr.yml`: added the jobs "Master key rotation without the key_custodian feature", "Master key rotation refusal with the kv feature" and "Master key rotation with an external key manager" (Juspay's Hyperswitch Encryption Service built from source at `v0.1.14`); existing jobs are unchanged.
+  - `docs/threat-model.md`: T22 proven; T23 cites the external key manager test; new open rows T35 (former key with an older copy of the database) and T36 (the configuration change is manual); moved line references.
+  - `docs/tokenization.md`: describes the rotation, how to run it, what it refuses, covers and leaves open; moved line references.
+  - `docs/superpowers/specs/2026-11-23-master-key-rotation-design.md` and `docs/superpowers/plans/2026-11-23-master-key-rotation.md`: design and implementation plan.
 
 ## Demo
 
