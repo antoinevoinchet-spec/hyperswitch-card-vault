@@ -118,6 +118,67 @@ impl MerchantInterface for Storage {
             })
             .collect::<Result<Vec<_>, _>>()
     }
+
+    async fn find_merchant_batch(
+        &self,
+        after_id: i32,
+        limit: i64,
+    ) -> Result<Vec<types::EncryptedMerchant>, ContainerError<Self::Error>> {
+        let conn = self.get_conn().await?;
+        let query = types::MerchantInner::table()
+            .filter(schema::merchant::id.gt(after_id))
+            .order(schema::merchant::id.asc())
+            .limit(limit);
+
+        let pool = conn.pool();
+        let operation = DbOperation::Filter;
+        super::log_db_query::<<types::MerchantInner as HasTable>::Table, _>(
+            &query, operation, pool,
+        );
+
+        let rows: Vec<types::MerchantInner> =
+            super::record_db_query::<<types::MerchantInner as HasTable>::Table, _, _, _>(
+                query.load_async(conn.get()),
+                operation,
+                pool,
+            )
+            .await?;
+
+        Ok(rows.into_iter().map(Into::into).collect())
+    }
+
+    async fn update_merchant_enc_key(
+        &self,
+        merchant_id: &str,
+        expected: Secret<Vec<u8>>,
+        new: Secret<Vec<u8>>,
+    ) -> Result<usize, ContainerError<Self::Error>> {
+        use diesel::BoolExpressionMethods as _;
+
+        let conn = self.get_conn().await?;
+        // Bound parameters; the second condition makes a concurrent change visible as 0 rows.
+        let query = diesel::update(types::MerchantInner::table())
+            .filter(
+                schema::merchant::merchant_id
+                    .eq(merchant_id.to_owned())
+                    .and(schema::merchant::enc_key.eq(types::Encrypted::new(expected))),
+            )
+            .set(schema::merchant::enc_key.eq(types::Encrypted::new(new)));
+
+        let pool = conn.pool();
+        let operation = DbOperation::Update;
+        super::log_db_query::<<types::MerchantInner as HasTable>::Table, _>(
+            &query, operation, pool,
+        );
+
+        let output = super::record_db_query_rows::<<types::MerchantInner as HasTable>::Table, _, _>(
+            query.execute_async(conn.get()),
+            operation,
+            pool,
+        )
+        .await?;
+        Ok(output)
+    }
 }
 
 impl super::LockerInterface for Storage {

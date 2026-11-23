@@ -518,6 +518,23 @@ pub(crate) trait MerchantInterface {
         key: &Self::Algorithm,
         limit: i64,
     ) -> Result<Vec<types::Merchant>, ContainerError<Self::Error>>;
+
+    /// Up to `limit` merchant rows with `id > after_id`, in `id` order, their key still encrypted.
+    /// Used by the master key rotation; always read from the primary database.
+    async fn find_merchant_batch(
+        &self,
+        after_id: i32,
+        limit: i64,
+    ) -> Result<Vec<types::EncryptedMerchant>, ContainerError<Self::Error>>;
+
+    /// Replaces the encrypted key of `merchant_id` with `new`, only if it still equals `expected`.
+    /// Returns the number of rows changed (0 when the row changed since it was read).
+    async fn update_merchant_enc_key(
+        &self,
+        merchant_id: &str,
+        expected: Secret<Vec<u8>>,
+        new: Secret<Vec<u8>>,
+    ) -> Result<usize, ContainerError<Self::Error>>;
 }
 
 ///
