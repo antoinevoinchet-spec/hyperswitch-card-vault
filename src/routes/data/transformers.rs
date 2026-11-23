@@ -121,3 +121,37 @@ pub fn get_data_duplication_status(
         false => DataDuplicationCheck::MetaDataChanged,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use hyperswitch_masking::Secret;
+
+    use super::*;
+    use crate::crypto::{
+        encryption_manager::managers::aes::generate_aes256_key,
+        hash_manager::managers::sha::CardDedupHmac,
+    };
+
+    fn data(value: serde_json::Value) -> types::Data {
+        serde_json::from_value(value).expect("request data")
+    }
+
+    #[test]
+    fn get_hash_keys_the_enc_card_data_branch() {
+        let key = Secret::new(generate_aes256_key().to_vec());
+        let hash = |request: &types::Data| {
+            get_hash(request, CardDedupHmac::from_master_key(&key).unwrap()).unwrap()
+        };
+        let enc = data(serde_json::json!({ "enc_card_data": "4111111111111111" }));
+        let card = data(serde_json::json!({ "card": { "card_number": "4111111111111111" } }));
+
+        let first = hash(&enc);
+        assert_eq!(first.len(), 64);
+        assert_eq!(first, hash(&enc));
+        // Both branches hash the same JSON string here, so they meet on purpose: the input bytes
+        // are unchanged by this fix, only the key is new.
+        assert_eq!(first, hash(&card));
+    }
+}
