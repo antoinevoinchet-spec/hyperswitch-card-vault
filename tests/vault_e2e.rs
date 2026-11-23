@@ -306,6 +306,11 @@ fn redact_hex(line: &str) -> String {
 
 impl Vault {
     async fn start(db: &TestDb, master_key: &str) -> Self {
+        Self::start_with_env(db, master_key, &[]).await
+    }
+
+    /// Starts the vault with `extra` environment variables added (the external key manager test).
+    async fn start_with_env(db: &TestDb, master_key: &str, extra: &[(&str, &str)]) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("bind a free port")
             .local_addr()
@@ -326,6 +331,7 @@ impl Vault {
             .env("LOCKER__DATABASE__PASSWORD", password)
             .env("LOCKER__DATABASE__DBNAME", &db.name)
             .env("LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY", master_key)
+            .envs(extra.iter().copied())
             .stdout(Stdio::from(log_file.try_clone().expect("clone log handle")))
             .stderr(Stdio::from(log_file))
             .spawn()
@@ -1561,4 +1567,787 @@ async fn rehash_keeps_the_newer_copy_after_a_key_change() {
     let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
     assert_eq!(code, 0, "second rehash failed");
     assert!(output.contains("moved: 0") && output.contains("duplicates: 0"));
+}
+
+// Master key rotation (`utils rotate-master-key`), see
+// `docs/superpowers/specs/2026-11-23-master-key-rotation-design.md`. The vault is stopped around
+// each run. Key bytes are compared with `assert!` so that a failure never prints a key.
+
+const MERCHANT_3: &str = "demo-merchant-3";
+const MERCHANT_NO_CARD: &str = "merchant-no-card";
+
+#[derive(QueryableByName, Debug)]
+struct MerchantRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    merchant_id: String,
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    enc_key: Vec<u8>,
+}
+
+#[derive(QueryableByName, Debug)]
+struct LockerDataRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    locker_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    merchant_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    customer_id: String,
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    enc_data: Vec<u8>,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    hash_id: String,
+}
+
+/// `(merchant_id, enc_key)` of every `merchant` row, ordered by merchant id.
+fn merchant_rows(db: &TestDb) -> Vec<(String, Vec<u8>)> {
+    diesel::sql_query("SELECT merchant_id, enc_key FROM merchant ORDER BY merchant_id")
+        .load::<MerchantRow>(&mut db.connection())
+        .expect("read merchant")
+        .into_iter()
+        .map(|row| (row.merchant_id, row.enc_key))
+        .collect()
+}
+
+/// Every column of every `merchant` row, as text, in a stable order.
+fn merchant_snapshot(db: &TestDb) -> Vec<String> {
+    diesel::sql_query("SELECT t::text AS text FROM merchant t ORDER BY merchant_id")
+        .load::<TextRow>(&mut db.connection())
+        .expect("snapshot merchant")
+        .into_iter()
+        .map(|row| row.text)
+        .collect()
+}
+
+/// `locker`, `hash_table` and `merchant` snapshots together.
+fn full_snapshot(db: &TestDb) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let (locker, hashes) = db.snapshot();
+    (locker, hashes, merchant_snapshot(db))
+}
+
+fn locker_data(db: &TestDb) -> Vec<LockerDataRow> {
+    diesel::sql_query(
+        "SELECT locker_id, merchant_id, customer_id, enc_data, hash_id FROM locker \
+         ORDER BY merchant_id, customer_id, locker_id",
+    )
+    .load(&mut db.connection())
+    .expect("read locker")
+}
+
+/// The plaintext of `blob` under `key`, if `key` opens it (AES-GCM tag checked).
+fn opens(key: &[u8], blob: &[u8]) -> Option<Vec<u8>> {
+    GcmAes256::new(key.to_vec()).decrypt(blob.to_vec()).ok()
+}
+
+fn wrap(key: &[u8], plain: &[u8]) -> Vec<u8> {
+    GcmAes256::new(key.to_vec())
+        .encrypt(plain.to_vec())
+        .expect("encrypt")
+}
+
+/// Merchant key of each row, opened with `key` (every row must open). Never printed.
+fn merchant_keys(db: &TestDb, key: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
+    merchant_rows(db)
+        .into_iter()
+        .map(|(id, blob)| {
+            let dek = opens(key, &blob).unwrap_or_else(|| panic!("{id} does not open"));
+            (id, dek)
+        })
+        .collect()
+}
+
+/// Standard input of the command: former then new custodian keys with `key_custodian`, the new
+/// raw key (hex) without it.
+fn rotation_input(former: &Keys, new: &Keys) -> String {
+    #[cfg(feature = "key_custodian")]
+    {
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            former.key1, former.key2, new.master_key, new.key1, new.key2
+        )
+    }
+    #[cfg(not(feature = "key_custodian"))]
+    {
+        let _ = former;
+        format!("{}\n", new.master_key)
+    }
+}
+
+/// Runs `utils rotate-master-key` with the former master key in the configuration and `stdin` on
+/// standard input. Returns the exit code and the joined standard output and error.
+fn run_rotation(db: &TestDb, former: &Keys, stdin: &str, args: &[&str]) -> (i32, String) {
+    use std::io::{Read, Write};
+
+    let host = db.url.host_str().expect("database host").to_string();
+    let db_port = db.url.port().unwrap_or(5432).to_string();
+    let password = db.url.password().unwrap_or("unused").to_string();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_utils"));
+    command
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["rotate-master-key", "--tenant", "public"])
+        .args(if args.contains(&"--batch-size") {
+            &[][..]
+        } else {
+            &["--batch-size", "2"][..]
+        })
+        .args(args)
+        .env("LOCKER__DATABASE__HOST", host)
+        .env("LOCKER__DATABASE__PORT", db_port)
+        .env("LOCKER__DATABASE__USERNAME", db.url.username())
+        .env("LOCKER__DATABASE__PASSWORD", password)
+        .env("LOCKER__DATABASE__DBNAME", &db.name)
+        .env(
+            "LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY",
+            &former.master_key,
+        );
+    #[cfg(feature = "external_key_manager")]
+    if let Ok(url) = std::env::var("VAULT_TEST_KEY_MANAGER_URL") {
+        command
+            .env("LOCKER__EXTERNAL_KEY_MANAGER__MODE", "enabled")
+            .env("LOCKER__EXTERNAL_KEY_MANAGER__URL", url);
+    }
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start utils rotate-master-key");
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(stdin.as_bytes());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for utils") {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rotation timed out");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut output)
+        .expect("read stdout");
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut output)
+        .expect("read stderr");
+    (status.code().unwrap_or(-1), output)
+}
+
+/// Values that must never appear in an output or an audit row: `secrets` for both key sets, both
+/// raw master keys, every merchant key and every `enc_key` value in the database now, every hash.
+fn rotation_secrets(db: &TestDb, former: &Keys, new: &Keys) -> Vec<String> {
+    let former_raw = unlocked_master_key(former);
+    let new_raw = unlocked_master_key(new);
+    let mut values = secrets(db, former, &former_raw);
+    values.extend(secrets(db, new, &new_raw));
+    for (_, blob) in merchant_rows(db) {
+        values.push(hex::encode(&blob));
+        for key in [&former_raw, &new_raw] {
+            if let Some(dek) = opens(key, &blob) {
+                values.push(hex::encode(dek));
+            }
+        }
+    }
+    values
+}
+
+fn rotation_audit(db: &TestDb) -> Vec<(String, String, i16)> {
+    db.audit_rows()
+        .into_iter()
+        .filter(|row| row.operation.starts_with("master_key_rotation_"))
+        .map(|row| (row.operation, row.outcome, row.status_code))
+        .collect()
+}
+
+/// Cards for `MERCHANT` (`ref-m1`) and `MERCHANT_2` (`ref-m2`), and `MERCHANT_NO_CARD` created by
+/// `POST /entity` with no card.
+async fn seed_rotation(vault: &Vault) {
+    store_card_with_ref(vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+    store_card_with_ref(vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+    let (status, _) = vault
+        .post(
+            "/entity",
+            serde_json::json!({ "entity_id": MERCHANT_NO_CARD }),
+        )
+        .await;
+    assert_eq!(status, 200, "create entity");
+}
+
+fn retrieve_request(merchant: &str, reference: &str) -> serde_json::Value {
+    serde_json::json!({
+        "merchant_id": merchant,
+        "merchant_customer_id": CUSTOMER,
+        "card_reference": reference
+    })
+}
+
+#[tokio::test]
+async fn rotation_cards_read_back_for_two_merchants() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+    let before = merchant_keys(&db, &unlocked_master_key(&former));
+    assert_eq!(before.len(), 3, "three merchant rows");
+
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation failed");
+    assert!(
+        output.contains("rewritten: 3"),
+        "every merchant row rewritten"
+    );
+
+    let vault = Vault::start(&db, &new.master_key).await;
+    unlock(&vault, &new).await;
+    for (merchant, reference) in [(MERCHANT, "ref-m1"), (MERCHANT_2, "ref-m2")] {
+        let (status, body) = vault
+            .post("/data/retrieve", retrieve_request(merchant, reference))
+            .await;
+        assert_eq!(status, 200, "retrieve {reference}");
+        assert!(body.contains(CARD_NUMBER), "{reference} lost its card");
+    }
+    let new_raw = unlocked_master_key(&new);
+    for (merchant_id, blob) in merchant_rows(&db) {
+        assert!(
+            opens(&new_raw, &blob).as_ref() == before.get(&merchant_id),
+            "{merchant_id} does not hold its merchant key under the new master key"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rotation_former_key_opens_no_merchant_row() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+
+    let (code, _) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation failed");
+
+    let (former_raw, new_raw) = (unlocked_master_key(&former), unlocked_master_key(&new));
+    let rows = merchant_rows(&db);
+    assert_eq!(rows.len(), 3);
+    for (merchant_id, blob) in rows {
+        assert!(
+            opens(&former_raw, &blob).is_none(),
+            "{merchant_id} still opens under the former master key"
+        );
+        assert!(
+            opens(&new_raw, &blob).is_some(),
+            "{merchant_id} does not open under the new master key"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rotation_keeps_duplicate_detection() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+    drop(vault);
+
+    let (code, _) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation failed");
+
+    let new_raw = unlocked_master_key(&new);
+    let vault = Vault::start(&db, &new.master_key).await;
+    unlock(&vault, &new).await;
+    let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+    assert_eq!(db.count("locker"), 1, "the duplicate add stored a copy");
+    for row in db.locker_rows() {
+        assert!(
+            db.hash_of(&row.hash_id)
+                == Some(expected_hash(
+                    &new_raw,
+                    &row.merchant_id,
+                    &row.customer_id,
+                    CARD_NUMBER
+                )),
+            "{} does not cite its hash under the new key",
+            row.locker_id
+        );
+    }
+    drop(vault);
+
+    // The check the operator runs once the configuration holds the new key.
+    let (code, output) = run_rehash(&db, &new, &new.key2, &[]);
+    assert_eq!(code, 0, "rehash with the new key failed");
+    assert!(output.contains("moved: 0"), "rehash still had rows to move");
+}
+
+/// State of one database after a rotation, comparable across databases (the ciphertexts differ,
+/// since each encryption draws a random nonce): for each merchant, which key opens its row and
+/// whether its merchant key is unchanged; for each card, whether its data is byte for byte
+/// unchanged and whether it cites its hash under the new key; the number of hash rows.
+fn canonical(
+    db: &TestDb,
+    former_raw: &[u8],
+    new_raw: &[u8],
+    deks: &std::collections::BTreeMap<String, Vec<u8>>,
+    cards: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> Vec<String> {
+    let mut state: Vec<String> = merchant_rows(db)
+        .into_iter()
+        .map(|(id, blob)| {
+            format!(
+                "{id} new={} former={} same_key={}",
+                opens(new_raw, &blob).is_some(),
+                opens(former_raw, &blob).is_some(),
+                opens(new_raw, &blob).as_ref() == deks.get(&id)
+            )
+        })
+        .collect();
+    for row in locker_data(db) {
+        let expected = expected_hash(new_raw, &row.merchant_id, &row.customer_id, CARD_NUMBER);
+        state.push(format!(
+            "{}/{}/{} same_data={} hash_ok={}",
+            row.merchant_id,
+            row.customer_id,
+            row.locker_id,
+            cards.get(&row.locker_id) == Some(&row.enc_data),
+            db.hash_of(&row.hash_id) == Some(expected)
+        ));
+    }
+    state.push(format!("hash rows={}", db.count("hash_table")));
+    state
+}
+
+#[tokio::test]
+async fn rotation_resumed_after_interruption_matches_a_full_run() {
+    let Some(admin) = admin_url() else { return };
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let (former_raw, new_raw) = (unlocked_master_key(&former), unlocked_master_key(&new));
+    let full = TestDb::create(&admin);
+    let resumed = TestDb::create(&admin);
+    let mut before = Vec::new();
+    for db in [&full, &resumed] {
+        let vault = Vault::start(db, &former.master_key).await;
+        unlock(&vault, &former).await;
+        store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+        store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+        store_card_with_ref(&vault, MERCHANT_3, CUSTOMER, card_data(), "ref-m3").await;
+        store_card_with_ref(&vault, MERCHANT, CUSTOMER_2, card_data(), "ref-m1-c2").await;
+        drop(vault);
+        let cards = locker_data(db)
+            .into_iter()
+            .map(|row| (row.locker_id, row.enc_data))
+            .collect();
+        before.push((merchant_keys(db, &former_raw), cards));
+    }
+    let input = rotation_input(&former, &new);
+
+    let (code, _) = run_rotation(&full, &former, &input, &[]);
+    assert_eq!(code, 0, "full rotation failed");
+
+    // Stopped between rows: one merchant row rewritten, the hash step not run.
+    let (code, output) = run_rotation(&resumed, &former, &input, &["--max-rows", "1"]);
+    assert_eq!(code, 2, "an interrupted run must exit 2");
+    assert!(output.contains("rewritten: 1") && output.contains("complete: no"));
+    // Started again from that mixed state, with no help: it progresses.
+    let (code, output) = run_rotation(&resumed, &former, &input, &["--max-rows", "1"]);
+    assert_eq!(code, 2, "the second interrupted run must exit 2");
+    assert!(
+        output.contains("rewritten: 1") && output.contains("already under the new key: 1"),
+        "the second run did not progress from the mixed state"
+    );
+    // A run killed after its last merchant row, before the hash step.
+    for (merchant_id, blob) in merchant_rows(&resumed) {
+        if let Some(dek) = opens(&former_raw, &blob) {
+            resumed.exec(&format!(
+                "UPDATE merchant SET enc_key = decode('{}', 'hex') WHERE merchant_id = '{merchant_id}'",
+                hex::encode(wrap(&new_raw, &dek))
+            ));
+        }
+    }
+    let (code, output) = run_rotation(&resumed, &former, &input, &[]);
+    assert_eq!(code, 0, "resumed rotation failed");
+    assert!(output.contains("complete: yes"));
+
+    let state_full = canonical(&full, &former_raw, &new_raw, &before[0].0, &before[0].1);
+    let state_resumed = canonical(&resumed, &former_raw, &new_raw, &before[1].0, &before[1].1);
+    assert!(
+        state_full.iter().all(|line| !line.contains("=false")),
+        "the full run did not reach the expected state: {state_full:?}"
+    );
+    assert_eq!(state_full, state_resumed);
+
+    // Run again after a complete rotation: nothing changes.
+    let snapshot = full_snapshot(&full);
+    let (code, output) = run_rotation(&full, &former, &input, &[]);
+    assert_eq!(code, 0, "a run after a complete rotation failed");
+    assert!(output.contains("already under the new key: 3"));
+    assert!(
+        full_snapshot(&full) == snapshot,
+        "a run after a complete rotation changed a row"
+    );
+}
+
+#[cfg(feature = "key_custodian")]
+#[tokio::test]
+async fn rotation_refuses_wrong_custodian_keys() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new, other) = (Keys::generate(), Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+    let before = full_snapshot(&db);
+    // A wrong key of the right shape (16 bytes as hex).
+    let wrong = uuid::Uuid::now_v7().simple().to_string();
+    let mut secrets = rotation_secrets(&db, &former, &new);
+    secrets.extend(rotation_secrets(&db, &former, &other));
+    secrets.push(wrong.clone());
+
+    let line = |k1: &str, k2: &str, enc: &str, n1: &str, n2: &str| {
+        format!("{k1}\n{k2}\n{enc}\n{n1}\n{n2}\n")
+    };
+    let cases = [
+        (
+            "wrong former key 2",
+            line(&former.key1, &wrong, &new.master_key, &new.key1, &new.key2),
+        ),
+        (
+            "wrong new key 2",
+            line(
+                &former.key1,
+                &former.key2,
+                &new.master_key,
+                &new.key1,
+                &wrong,
+            ),
+        ),
+        (
+            "new encrypted key of another generation",
+            line(
+                &former.key1,
+                &former.key2,
+                &other.master_key,
+                &new.key1,
+                &new.key2,
+            ),
+        ),
+        (
+            "four lines",
+            format!(
+                "{}\n{}\n{}\n{}\n",
+                former.key1, former.key2, new.master_key, new.key1
+            ),
+        ),
+    ];
+    for (case, input) in cases {
+        let runs_before = rotation_audit(&db).len();
+        let (code, output) = run_rotation(&db, &former, &input, &[]);
+        assert_eq!(code, 1, "{case}: must be refused");
+        assert!(
+            output.contains("rotation failed: DecryptingKeysFailed"),
+            "{case}: not the refusal of the custodian keys"
+        );
+        assert!(full_snapshot(&db) == before, "{case}: a row changed");
+        let audit = rotation_audit(&db);
+        assert_eq!(audit.len(), runs_before + 1, "{case}: no run entry");
+        assert_eq!(
+            (audit[runs_before].0.as_str(), audit[runs_before].1.as_str()),
+            ("master_key_rotation_run", "failure"),
+            "{case}"
+        );
+        assert_no_secret(&output, &secrets);
+    }
+}
+
+#[tokio::test]
+async fn rotation_refuses_the_same_master_key() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let former = Keys::generate();
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+    let before = full_snapshot(&db);
+
+    let mut cases = vec![("same keys", rotation_input(&former, &former))];
+    #[cfg(feature = "key_custodian")]
+    {
+        // The same master key wrapped under other custodian keys: a change of custodian keys only.
+        let other = Keys::generate();
+        let custodian = hex::decode(format!("{}{}", other.key1, other.key2)).expect("hex");
+        let rewrapped = hex::encode(wrap(&custodian, &unlocked_master_key(&former)));
+        cases.push((
+            "same master key, other custodian keys",
+            format!(
+                "{}\n{}\n{rewrapped}\n{}\n{}\n",
+                former.key1, former.key2, other.key1, other.key2
+            ),
+        ));
+    }
+    #[cfg(not(feature = "key_custodian"))]
+    cases.push((
+        "raw key of 31 bytes",
+        format!("{}\n", hex::encode(random_bytes(31))),
+    ));
+
+    for (case, input) in cases {
+        let (code, output) = run_rotation(&db, &former, &input, &[]);
+        assert_eq!(code, 1, "{case}: must be refused");
+        assert!(
+            output.contains("rotation failed: ValidationError"),
+            "{case}: not the refusal of the new key"
+        );
+        assert!(full_snapshot(&db) == before, "{case}: a row changed");
+    }
+}
+
+#[tokio::test]
+async fn rotation_refuses_a_row_under_a_third_key() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+    drop(vault);
+    // Last in id order, so the rows before it would already be rewritten without the pre-check.
+    db.exec(&format!(
+        "INSERT INTO merchant (merchant_id, enc_key, created_at) \
+         VALUES ('merchant-third', decode('{}', 'hex'), (now() AT TIME ZONE 'utc'))",
+        hex::encode(wrap(&random_bytes(32), &random_bytes(32)))
+    ));
+    let before = full_snapshot(&db);
+
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 1, "a row under a third key must stop the run");
+    assert!(
+        output.contains("rotation failed: MerchantKeyError"),
+        "not the refusal of the pre-check"
+    );
+    assert!(full_snapshot(&db) == before, "a row changed");
+}
+
+#[tokio::test]
+async fn rotation_audit_and_output_hold_no_key() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+    let mut secrets = rotation_secrets(&db, &former, &new);
+
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation failed");
+    secrets.extend(rotation_secrets(&db, &former, &new));
+
+    let summary: Vec<_> = rotation_audit(&db)
+        .iter()
+        .map(|(operation, outcome, status)| (operation.clone(), outcome.clone(), *status))
+        .collect();
+    let row = || {
+        (
+            "master_key_rotation_row".to_string(),
+            "success".to_string(),
+            200,
+        )
+    };
+    assert_eq!(
+        summary,
+        [
+            row(),
+            row(),
+            row(),
+            (
+                "master_key_rotation_run".to_string(),
+                "success".to_string(),
+                200
+            )
+        ]
+    );
+    for row in db.audit_rows() {
+        assert_no_secret(&row.text, &secrets);
+    }
+    assert_no_secret(&output, &secrets);
+}
+
+#[tokio::test]
+async fn rotation_stops_when_audit_table_is_unwritable() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    seed_rotation(&vault).await;
+    drop(vault);
+    let before = full_snapshot(&db);
+
+    db.exec("ALTER TABLE audit_log RENAME TO audit_log_blocked");
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    db.exec("ALTER TABLE audit_log_blocked RENAME TO audit_log");
+
+    assert_eq!(code, 1, "the rotation must fail without its audit rows");
+    assert!(
+        output.contains("rotation failed"),
+        "not the command's own error"
+    );
+    assert!(
+        full_snapshot(&db) == before,
+        "a row changed without its audit entry"
+    );
+}
+
+#[tokio::test]
+async fn rotation_on_an_empty_tenant_succeeds() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation of an empty tenant failed");
+    for line in ["merchant rows: 0", "hash examined: 0", "complete: yes"] {
+        assert!(output.contains(line), "output lacks `{line}`");
+    }
+}
+
+#[tokio::test]
+async fn rotation_refuses_a_batch_size_of_zero() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let vault = Vault::start(&db, &former.master_key).await;
+    unlock(&vault, &former).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+    drop(vault);
+    let before = full_snapshot(&db);
+
+    let (code, output) = run_rotation(
+        &db,
+        &former,
+        &rotation_input(&former, &new),
+        &["--batch-size", "0"],
+    );
+    assert_eq!(code, 1, "a batch size of 0 must be refused");
+    assert!(output.contains("rotation failed: ValidationError"));
+    assert!(full_snapshot(&db) == before, "a row changed");
+}
+
+/// Under `kv`, the pre-check's read of the locker rows refuses before any merchant row is written.
+/// No vault is started (built with `kv`, it needs a Redis).
+#[cfg(feature = "kv")]
+#[tokio::test]
+async fn rotation_refuses_to_run_with_kv() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    db.exec(&format!(
+        "INSERT INTO merchant (merchant_id, enc_key, created_at) \
+         VALUES ('{MERCHANT}', decode('{}', 'hex'), (now() AT TIME ZONE 'utc'))",
+        hex::encode(wrap(&unlocked_master_key(&former), &random_bytes(32)))
+    ));
+    let before = full_snapshot(&db);
+
+    let (code, output) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 1, "the rotation must refuse to run under kv");
+    assert!(
+        output.contains("rotation failed: RetrieveDataFailed"),
+        "not the refusal of the locker read"
+    );
+    assert!(full_snapshot(&db) == before, "a row changed under kv");
+    let audit: Vec<_> = rotation_audit(&db)
+        .into_iter()
+        .map(|(operation, outcome, _)| (operation, outcome))
+        .collect();
+    assert_eq!(
+        audit,
+        [("master_key_rotation_run".to_string(), "failure".to_string())]
+    );
+}
+
+/// Against Juspay's Hyperswitch Encryption Service, reached at `VAULT_TEST_KEY_MANAGER_URL`. Cards
+/// are encrypted by the service; the master key still wraps a merchant row waiting for
+/// `/key/transfer` and still keys the duplicate-check hash.
+#[cfg(feature = "external_key_manager")]
+#[tokio::test]
+async fn rotation_with_external_key_manager() {
+    let Some(admin) = admin_url() else { return };
+    let Ok(url) = std::env::var("VAULT_TEST_KEY_MANAGER_URL") else {
+        assert!(
+            std::env::var_os("VAULT_TEST_REQUIRE_DB").is_none(),
+            "VAULT_TEST_REQUIRE_DB is set but VAULT_TEST_KEY_MANAGER_URL is not"
+        );
+        println!("skipped: VAULT_TEST_KEY_MANAGER_URL not set");
+        return;
+    };
+    let env = [
+        ("LOCKER__EXTERNAL_KEY_MANAGER__MODE", "enabled"),
+        ("LOCKER__EXTERNAL_KEY_MANAGER__URL", url.as_str()),
+    ];
+    let db = TestDb::create(&admin);
+    let (former, new) = (Keys::generate(), Keys::generate());
+    let (former_raw, new_raw) = (unlocked_master_key(&former), unlocked_master_key(&new));
+    let vault = Vault::start_with_env(&db, &former.master_key, &env).await;
+    unlock(&vault, &former).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
+    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+    drop(vault);
+    // A merchant key an older deployment left, waiting for `/key/transfer`.
+    db.exec(&format!(
+        "INSERT INTO merchant (merchant_id, enc_key, created_at) \
+         VALUES ('legacy-merchant', decode('{}', 'hex'), (now() AT TIME ZONE 'utc'))",
+        hex::encode(wrap(&former_raw, &random_bytes(32)))
+    ));
+
+    let (code, _) = run_rotation(&db, &former, &rotation_input(&former, &new), &[]);
+    assert_eq!(code, 0, "rotation failed");
+
+    let legacy = merchant_rows(&db)
+        .into_iter()
+        .find(|(id, _)| id == "legacy-merchant")
+        .expect("legacy-merchant")
+        .1;
+    assert!(
+        opens(&new_raw, &legacy).is_some() && opens(&former_raw, &legacy).is_none(),
+        "the merchant row waiting for transfer is not under the new key only"
+    );
+
+    let vault = Vault::start_with_env(&db, &new.master_key, &env).await;
+    unlock(&vault, &new).await;
+    for (merchant, reference) in [(MERCHANT, "ref-m1"), (MERCHANT_2, "ref-m2")] {
+        let (status, body) = vault
+            .post("/data/retrieve", retrieve_request(merchant, reference))
+            .await;
+        assert_eq!(status, 200, "retrieve {reference}");
+        assert!(body.contains(CARD_NUMBER), "{reference} lost its card");
+    }
+    let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+    let (status, body) = vault
+        .post("/key/transfer", serde_json::json!({ "limit": 10 }))
+        .await;
+    assert_eq!(status, 200, "key transfer");
+    let transferred: serde_json::Value = serde_json::from_str(&body).expect("transfer JSON");
+    assert_eq!(transferred["total_transferred"], 1);
 }
