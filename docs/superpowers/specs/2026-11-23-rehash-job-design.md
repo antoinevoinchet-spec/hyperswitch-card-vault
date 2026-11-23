@@ -79,8 +79,8 @@ None of them settles where such a job should run.
   Verifiable by: e2e test comparing snapshots of both tables before and after a second run.
 - **D5** An interruption then a resume give the same final state as one complete run: state is
   never kept by the job itself, it is recomputed from the rows. Covered interruptions: between two
-  batches, after a new hash row is inserted but before the `locker` row is moved, and after the
-  move but before the old hash row is deleted.
+  rows (in the middle of a batch), after a new hash row is inserted but before the `locker` row is
+  moved, and after the move but before the old hash row is deleted.
   Verifiable by: e2e test running the same data set on two databases (one complete run; one with
   the three interrupted states written into the database, then resumed) and comparing a canonical
   state keyed by fixed card references.

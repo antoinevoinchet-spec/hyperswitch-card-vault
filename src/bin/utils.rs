@@ -59,7 +59,7 @@ struct Rehash {
     /// rows read per database query (default 100)
     #[argh(option, default = "100")]
     batch_size: i64,
-    /// stop after this many rows; running the command again resumes
+    /// stop after this many rows (exit code 2); run again without it to finish
     #[argh(option)]
     max_rows: Option<u64>,
 }
