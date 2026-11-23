@@ -34,6 +34,8 @@ pub enum AuditOperation {
     CustodianKey1,
     CustodianKey2,
     CustodianDecrypt,
+    RehashRow,
+    RehashRun,
 }
 
 impl AuditOperation {
@@ -51,6 +53,8 @@ impl AuditOperation {
             Self::CustodianKey1 => "custodian_key1",
             Self::CustodianKey2 => "custodian_key2",
             Self::CustodianDecrypt => "custodian_decrypt",
+            Self::RehashRow => "rehash_row",
+            Self::RehashRun => "rehash_run",
         }
     }
 }
@@ -321,6 +325,25 @@ pub fn entity_audit(
         .merchant(&request.entity_id)
 }
 
+/// Entry for one `locker` row changed by the re-hash job, written before the change: it records
+/// the attempt, and [`rehash_run_audit`] the result of the run.
+pub fn rehash_row_audit(
+    tenant_id: &str,
+    merchant_id: &str,
+    customer_id: &str,
+    locker_id: &str,
+) -> PendingAudit {
+    PendingAudit::new(tenant_id, None, AuditOperation::RehashRow)
+        .merchant(merchant_id)
+        .customer(customer_id)
+        .resource(locker_id)
+}
+
+/// Entry for one run of the re-hash job. It takes no row data.
+pub fn rehash_run_audit(tenant_id: &str) -> PendingAudit {
+    PendingAudit::new(tenant_id, None, AuditOperation::RehashRun)
+}
+
 /// Entry for `/key/transfer`. The request only holds a batch size, so no identifier is kept.
 pub fn key_transfer_audit(tenant_id: &str, request_id: Option<String>) -> PendingAudit {
     PendingAudit::new(tenant_id, request_id, AuditOperation::KeyTransfer)
@@ -562,6 +585,23 @@ mod tests {
         assert!(json.contains("vault_123"));
         assert_eq!(entry.operation, "vault_add");
         assert_eq!(entry.merchant_id.as_deref(), Some("entity_abc"));
+    }
+
+    #[test]
+    fn rehash_row_entry_has_ids_only() {
+        let entry = rehash_row_audit("public", "merchant_abc", "customer_xyz", "4111111111111111")
+            .finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        assert_eq!(entry.operation, "rehash_row");
+        assert_eq!(entry.merchant_id.as_deref(), Some("merchant_abc"));
+        assert_eq!(entry.customer_id.as_deref(), Some("customer_xyz"));
+        assert_eq!(entry.resource_id.as_deref(), Some("redacted"));
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("4111111111111111"));
+
+        let run = rehash_run_audit("public").finish(&Ok::<(), ContainerError<ApiError>>(()));
+        assert_eq!(run.operation, "rehash_run");
+        assert_eq!(run.merchant_id, None);
     }
 
     #[test]

@@ -59,3 +59,57 @@ pub async fn insert_or_get(
         }
     }
 }
+
+/// Counts printed by the re-hash job. They must balance: every examined row is current, moved or
+/// a duplicate.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RehashReport {
+    pub examined: u64,
+    pub current: u64,
+    pub moved: u64,
+    pub duplicates: u64,
+    pub removed_hash_rows: u64,
+    pub complete: bool,
+}
+
+impl RehashReport {
+    /// Fails when the counts do not add up, so the final clean-up never runs on a run whose
+    /// counts cannot be trusted.
+    pub(crate) fn check_balance(&self) -> Result<(), ContainerError<error::ApiError>> {
+        if self.examined == self.current + self.moved + self.duplicates {
+            Ok(())
+        } else {
+            Err(error::ApiError::DatabaseError.into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[test]
+    fn report_balance_accepts_matching_counts() {
+        let report = RehashReport {
+            examined: 4,
+            current: 1,
+            moved: 2,
+            duplicates: 1,
+            ..RehashReport::default()
+        };
+        assert!(report.check_balance().is_ok());
+    }
+
+    #[test]
+    fn report_balance_rejects_mismatched_counts() {
+        let report = RehashReport {
+            examined: 3,
+            current: 1,
+            moved: 1,
+            ..RehashReport::default()
+        };
+        assert!(report.check_balance().is_err());
+    }
+}
