@@ -98,6 +98,10 @@ Tests (names exact; gating in brackets; each starts with `let Some(admin) = admi
 
 - [ ] **Step 1: Write the tests**
 
+  Writing rule: no assertion may print a key on failure. Key bytes are compared with
+  `assert!(a == b, "<merchant_id> …")` or turned into booleans first, never with `assert_eq!`; the
+  failure lines copied into the report in Task 6 are reread before they are pasted.
+
   1. `rotation_cards_read_back_for_two_merchants` — store the test card for `MERCHANT` (`ref-m1`) and
      `MERCHANT_2` (`ref-m2`), `POST /entity` for `merchant-no-card`; record each merchant key
      (`opens(former_raw, enc_key)`); stop the vault; `run_rotation` → `code == 0`,
@@ -385,17 +389,20 @@ Two failed attempts at getting `cripta` to serve requests stop this task: report
   as the check), what it covers and what it does not (merchant keys and cards unchanged: a leaked
   former key with an older copy of the database still reads cards; keep the former key until older
   backups expire), the external mode, the modes tested and the CI jobs.
-- [ ] `docs/threat-model.md`: T22 → `proven`, control citing `src/domain/master_key.rs` (pre-check,
+- [ ] `docs/threat-model.md`: T22 → `proven` for the rotation itself, its row saying that the
+  configuration change after the command is manual (see T36); control citing `src/domain/master_key.rs` (pre-check,
   rewrite, final check, hash step) and `src/bin/utils.rs`, evidence tests 1–12; T23 evidence gains
   `rotation_with_external_key_manager`, stays `open`; new `open` rows T35 (former key plus an older
   database copy still give every merchant key) and T36 (between the command and the configuration
   change, or if the vault is started mid-rotation, cards do not read back), each citing the new
   `docs/tokenization.md` lines; "How to check it yourself" gains the three CI jobs; every moved
-  `file:line` corrected and reread (begin and end of each block).
+  `file:line` in `docs/threat-model.md`, `docs/tokenization.md` and `README.md` corrected and reread
+  (begin and end of each block).
 - [ ] `README.md`: new entry under "Changes from the original" naming every file of
   `git diff --name-only main` except `README.md`; checked by
   `for f in $(git diff --name-only main); do [ "$f" = README.md ] || grep -q -F "$f" README.md || echo "MISSING $f"; done`
-  (no output), run again at the end of Task 10.
+  (no output), run again at the end of Task 10. `grep -n -i 'rotation' README.md` shows no sentence
+  left saying that rotation is not implemented.
 - [ ] The docs list the modes not covered: `kv` (refused), concurrent writers (read in the code, not
   tested), a public or placeholder master key with an external key manager (T23).
 - [ ] `scripts/check-threat-model.sh` → `OK: 36 rows (15 proven, 7 not tested, 14 open)`;
@@ -408,7 +415,8 @@ Two failed attempts at getting `cripta` to serve requests stop this task: report
 
 - [ ] `cargo fmt --all --check` (stable; `cargo +nightly fmt` and `typos` are not installed: "not
   run" in the report); `RUSTFLAGS="-D warnings" cargo clippy -j 4 --all-features --all-targets`
-  compared with `main`; `cargo test -j 4` (≥ 67 passed: 61 + 6 unit tests); full e2e with `key_custodian` (0 failed,
+  compared with `main`; `cargo test -j 4` (≥ 77 passed: 61 + 6 unit tests + 10 e2e tests that report passed without a
+  database); full e2e with `key_custodian` (0 failed,
   31 passed); `make demo` with `DEMO_DATABASE_URL` → `DEMO OK`.
 - [ ] Locked-paths check: `git diff --name-only main -- migrations config demo Cargo.toml Cargo.lock deny.toml CLAUDE.md .typos.toml LICENSE scripts` → empty.
 - [ ] Compliance-wording search (pattern kept in the scratchpad) on added lines of `git diff main`,

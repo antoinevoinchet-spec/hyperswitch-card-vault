@@ -127,7 +127,7 @@ then destroyed (idea I2). This fork writes no tool for either step.
   for `/key/transfer` opens under the new master key and not the former one, and `/key/transfer`
   then moves it to the service.
   Verifiable by: e2e test run in a CI job added for this mode, with the service and its database
-  as job services; seen failing when the hash step, then the rewrite of merchant rows, is removed.
+  as background processes of that job; seen failing when the hash step, then the rewrite of merchant rows, is removed.
 - **D11** No change visible to callers of the existing routes, no migration, no configuration
   change, no new dependency. `cargo test -j 4` (at least 61 passed), the e2e suite (0 failed, at
   least 20 plus the new tests) and `make demo` (`DEMO OK`) still pass.
@@ -210,13 +210,14 @@ the vault must not be started: some merchants open only under one key and some o
   (its published image is built with the `release` feature, which requires AWS KMS and mutual TLS:
   read in its `Cargo.toml` and `Dockerfile` on 2026-11-23). It keeps its keys under its own AES-256
   key and serves plain HTTP. Its database lives on the same PostgreSQL; its migrations, read at the
-  pinned commit, are applied by a job step; the
+  pinned commit, are applied by a step of the CI job (or by hand on a local run); the service is
+  started as a background process, not a container, in CI and locally; the
   vault and `utils` get `LOCKER__EXTERNAL_KEY_MANAGER__…` variables. Without mutual TLS (the
   `Enabled` variant), since both run on the job's private network. A merchant row waiting for
   transfer is written by the test, encrypted with `GcmAes256` under the former master key, as an
   older deployment left it.
-- Local runs need Docker; with 8 GB of RAM, the service runs alone, without the vault's other
-  services.
+- Local runs need no Docker: the service is built with `cargo` and runs against the throwaway
+  PostgreSQL cluster; with 8 GB of RAM, nothing else runs beside it.
 
 ### Storage primitives (`src/storage.rs`, `src/storage/db.rs`, cache layer)
 
