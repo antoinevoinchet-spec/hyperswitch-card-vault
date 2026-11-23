@@ -594,6 +594,18 @@ async fn card_known_to_others_takes_the_new_card_path() {
     let new_b = rows_added_by(&db, &vault, MERCHANT, CUSTOMER, card_b).await;
     let other_customer = rows_added_by(&db, &vault, MERCHANT, "demo-customer-2", card_b).await;
 
+    // What a database reader would compare: no two locker rows share a hash id, neither across
+    // merchants (pair 1) nor across customers of one merchant (pair 2).
+    let hash_ids: std::collections::BTreeSet<String> = db
+        .locker_hash_ids()
+        .into_iter()
+        .map(|(_, hash_id)| hash_id)
+        .collect();
+    assert_eq!(
+        hash_ids.len(),
+        4,
+        "two locker rows share a hash id, which links their owners"
+    );
     assert_eq!(
         (new_a, new_b),
         ((1, 1), (1, 1)),
