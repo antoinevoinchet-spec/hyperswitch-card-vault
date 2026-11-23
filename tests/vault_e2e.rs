@@ -813,7 +813,13 @@ fn run_rehash(db: &TestDb, keys: &Keys, key2: &str, args: &[&str]) -> (i32, Stri
     let password = db.url.password().unwrap_or("unused").to_string();
     let mut child = Command::new(env!("CARGO_BIN_EXE_utils"))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
-        .args(["rehash", "--tenant", "public", "--batch-size", "2"])
+        .args(["rehash", "--tenant", "public"])
+        // Two rows per batch, so every data set spans several batches, unless the test sets it.
+        .args(if args.contains(&"--batch-size") {
+            &[][..]
+        } else {
+            &["--batch-size", "2"][..]
+        })
         .args(args)
         .env("LOCKER__DATABASE__HOST", host)
         .env("LOCKER__DATABASE__PORT", db_port)
@@ -939,13 +945,15 @@ async fn seed_first(db: &TestDb, vault: &Vault, keys: &Keys) -> Vec<u8> {
     seed_v1(
         db,
         &master_key,
+        // Updated in reverse order, so the rows' physical order differs from their id order and
+        // only the job's ordering makes the cursor see every row.
         &[
+            ("legacy-enc", ENC_DATA, &["ref-enc"]),
             (
                 "legacy-v1",
                 CARD_NUMBER,
-                &["ref-m1-c1", "ref-m2-c1", "ref-m1-c2"],
+                &["ref-m1-c2", "ref-m2-c1", "ref-m1-c1"],
             ),
-            ("legacy-enc", ENC_DATA, &["ref-enc"]),
         ],
     );
     master_key
@@ -1001,6 +1009,8 @@ async fn rehash_moves_v1_rows_to_scoped_hashes() {
     let vault = Vault::start(&db, &keys.master_key).await;
     unlock(&vault, &keys).await;
     let master_key = seed_first(&db, &vault, &keys).await;
+    // Built before the run, while the old hash values are still in the database.
+    let secrets = secrets(&db, &keys, &master_key);
     drop(vault);
 
     let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
@@ -1029,7 +1039,7 @@ async fn rehash_moves_v1_rows_to_scoped_hashes() {
         assert!(db.hash_of(old).is_none(), "{old} is still in hash_table");
     }
     assert_eq!(db.count("hash_table"), 4);
-    assert_no_secret(&output, &secrets(&db, &keys, &master_key));
+    assert_no_secret(&output, &secrets);
 
     let vault = Vault::start(&db, &keys.master_key).await;
     unlock(&vault, &keys).await;
@@ -1109,12 +1119,13 @@ async fn rehash_twice_changes_nothing() {
     let vault = Vault::start(&db, &keys.master_key).await;
     unlock(&vault, &keys).await;
     store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-old").await;
-    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2-c1").await;
+    // The same card reference for another merchant: only the merchant and customer tell the rows apart.
+    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-old").await;
     let master_key = unlocked_master_key(&keys);
     seed_v1(
         &db,
         &master_key,
-        &[("legacy-v1", CARD_NUMBER, &["ref-old", "ref-m2-c1"])],
+        &[("legacy-v1", CARD_NUMBER, &["ref-old"])],
     );
     drop(vault);
     let vault = Vault::start(&db, &keys.master_key).await;
@@ -1140,7 +1151,10 @@ async fn rehash_twice_changes_nothing() {
         .collect();
     assert_eq!(
         new_rows,
-        [("rehash_run".to_string(), "success".to_string(), 200)]
+        [
+            ("rehash_cleanup".to_string(), "success".to_string(), 200),
+            ("rehash_run".to_string(), "success".to_string(), 200)
+        ]
     );
     for line in ["moved: 0", "duplicates: 0", "removed hash rows: 0"] {
         assert!(output.contains(line), "second run output lacks `{line}`");
@@ -1213,6 +1227,8 @@ async fn rehash_audit_rows_hold_no_card_or_key() {
     let vault = Vault::start(&db, &keys.master_key).await;
     unlock(&vault, &keys).await;
     let master_key = seed_first(&db, &vault, &keys).await;
+    // Built before the run, while the old hash values are still in the database.
+    let secrets = secrets(&db, &keys, &master_key);
     drop(vault);
 
     let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
@@ -1237,10 +1253,10 @@ async fn rehash_audit_rows_hold_no_card_or_key() {
             ("rehash_row", "success", 200),
             ("rehash_row", "success", 200),
             ("rehash_row", "success", 200),
+            ("rehash_cleanup", "success", 200),
             ("rehash_run", "success", 200),
         ]
     );
-    let secrets = secrets(&db, &keys, &master_key);
     for row in &rows {
         assert_no_secret(&row.text, &secrets);
     }
@@ -1371,4 +1387,105 @@ async fn rehash_refuses_wrong_custodian_keys() {
     let mut secrets = secrets(&db, &keys, &master_key);
     secrets.push(wrong_key2);
     assert_no_secret(&output, &secrets);
+}
+
+#[tokio::test]
+async fn rehash_cleanup_stops_when_audit_table_is_unwritable() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    // No card at all: the final clean-up is the only change the run would make.
+    insert_hash_row(&db, "orphan-v1", &random_bytes(64), "'2000-01-01'");
+
+    db.exec("ALTER TABLE audit_log RENAME TO audit_log_blocked");
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    db.exec("ALTER TABLE audit_log_blocked RENAME TO audit_log");
+
+    assert_eq!(code, 1, "rehash must fail without its audit rows");
+    assert!(
+        output.contains("rehash failed"),
+        "not the re-hash command's own error"
+    );
+    assert!(
+        db.hash_of("orphan-v1").is_some(),
+        "the clean-up deleted a row without its audit entry"
+    );
+}
+
+#[tokio::test]
+async fn rehash_refuses_a_batch_size_of_zero() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    seed_first(&db, &vault, &keys).await;
+    drop(vault);
+    let before = db.snapshot();
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &["--batch-size", "0"]);
+    assert_eq!(code, 1, "a batch size of 0 must be refused");
+    assert!(
+        output.contains("rehash failed"),
+        "not the re-hash command's own error"
+    );
+    assert!(
+        db.snapshot() == before,
+        "a row changed although the run was refused"
+    );
+}
+
+#[tokio::test]
+async fn rehash_keeps_the_newer_copy_after_a_key_change() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-old").await;
+    let master_key = unlocked_master_key(&keys);
+    seed_v1(
+        &db,
+        &master_key,
+        &[("legacy-v1", CARD_NUMBER, &["ref-old"])],
+    );
+    drop(vault);
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-new").await;
+    drop(vault);
+    // Then a change of master key: neither copy holds the current hash any more.
+    let other_key = random_bytes(32);
+    let new_hash_id = db
+        .locker_rows()
+        .into_iter()
+        .find(|row| row.locker_id == "ref-new")
+        .expect("ref-new")
+        .hash_id;
+    db.exec(&format!(
+        "UPDATE hash_table SET data_hash = decode('{}', 'hex') WHERE hash_id = '{new_hash_id}'",
+        hex::encode(expected_hash(&other_key, MERCHANT, CUSTOMER, CARD_NUMBER))
+    ));
+
+    let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+    let rows = db.locker_rows();
+    let row = |reference: &str| {
+        rows.iter()
+            .find(|row| row.locker_id == reference)
+            .unwrap_or_else(|| panic!("{reference} is gone"))
+    };
+    assert!(
+        db.hash_of(&row("ref-new").hash_id)
+            == Some(expected_hash(&master_key, MERCHANT, CUSTOMER, CARD_NUMBER)),
+        "the newer copy does not hold the current hash"
+    );
+    assert!(
+        db.hash_of(&row("ref-old").hash_id).is_none(),
+        "the older copy is not the detached one"
+    );
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "second rehash failed");
+    assert!(output.contains("moved: 0") && output.contains("duplicates: 0"));
 }

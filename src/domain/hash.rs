@@ -97,6 +97,10 @@ async fn rehash_rows(
     batch_size: i64,
     max_rows: Option<u64>,
 ) -> Result<RehashReport, ContainerError<error::ApiError>> {
+    if batch_size < 1 {
+        // A limit of 0 would read no row and report a complete run.
+        return Err(error::ApiError::ValidationError("batch size must be at least 1").into());
+    }
     let started = crate::utils::date_time::now();
     let mut report = RehashReport::default();
     let mut cursor = 0;
@@ -119,6 +123,13 @@ async fn rehash_rows(
 
     if report.complete {
         report.check_balance()?;
+        // The clean-up deletes rows too: its audit entry comes first, like each row's.
+        audit::record(
+            &state.db,
+            audit::rehash_cleanup_audit(&state.config.tenant_id),
+            Ok(()),
+        )
+        .await?;
         let removed = state
             .db
             .delete_unused_hashes_before(started - CLEAN_UP_MARGIN)
@@ -139,6 +150,7 @@ async fn rehash_row(
     let merchant_id = locker.merchant_id.clone();
     let customer_id = locker.customer_id.clone();
     let old_hash_id = locker.hash_id.clone();
+    let created_at = locker.created_at;
 
     let crypto_manager = keymanager::get_dek_manager(&state.config.external_key_manager)
         .find_by_entity_id(state, merchant_id.clone())
@@ -183,7 +195,36 @@ async fn rehash_row(
                 &customer_id,
             )
             .await?;
-        if holder.is_some_and(|other| other.locker_id.peek() != locker_id.peek()) {
+        if let Some(other) = holder.filter(|other| other.locker_id.peek() != locker_id.peek()) {
+            if other.created_at < created_at {
+                // The newer copy keeps the current hash (W2): detach the older holder, then move
+                // this row. Both audit entries come before either write.
+                record_row(state, &merchant_id, &customer_id, &other.locker_id).await?;
+                record_row(state, &merchant_id, &customer_id, &locker_id).await?;
+                move_row(
+                    state,
+                    &other.locker_id,
+                    &merchant_id,
+                    &customer_id,
+                    &target.hash_id,
+                    &generate_uuid(),
+                    false,
+                )
+                .await?;
+                let removed = move_row(
+                    state,
+                    &locker_id,
+                    &merchant_id,
+                    &customer_id,
+                    &old_hash_id,
+                    &target.hash_id,
+                    true,
+                )
+                .await?;
+                report.duplicates += 1;
+                report.removed_hash_rows += removed;
+                return Ok(());
+            }
             if cited.is_none() {
                 // Detached by an earlier run: nothing left to do.
                 report.current += 1;
@@ -197,6 +238,7 @@ async fn rehash_row(
                 &customer_id,
                 &old_hash_id,
                 &generate_uuid(),
+                true,
             )
             .await?;
             report.duplicates += 1;
@@ -218,6 +260,7 @@ async fn rehash_row(
         &customer_id,
         &old_hash_id,
         &new_hash_id,
+        true,
     )
     .await?;
     report.moved += 1;
@@ -245,8 +288,8 @@ async fn record_row(
     .await
 }
 
-/// Points the row at `new_hash_id`, then deletes the old hash row if nothing cites it any more.
-/// Returns the number of hash rows deleted (0 or 1).
+/// Points the row at `new_hash_id`, then, with `delete_old`, deletes the old hash row if nothing
+/// cites it any more. Returns the number of hash rows deleted (0 or 1).
 async fn move_row(
     state: &TenantAppState,
     locker_id: &Secret<String>,
@@ -254,6 +297,7 @@ async fn move_row(
     customer_id: &str,
     old_hash_id: &str,
     new_hash_id: &str,
+    delete_old: bool,
 ) -> Result<u64, ContainerError<error::ApiError>> {
     let changed = state
         .db
@@ -268,6 +312,9 @@ async fn move_row(
     if changed == 0 {
         // The row changed since it was read: stop rather than count it.
         return Err(error::ApiError::DatabaseError.into());
+    }
+    if !delete_old {
+        return Ok(0);
     }
     let removed = state.db.delete_hash_if_unused(old_hash_id).await?;
     Ok(u64::from(removed.is_some()))

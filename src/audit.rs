@@ -36,6 +36,7 @@ pub enum AuditOperation {
     CustodianDecrypt,
     RehashRow,
     RehashRun,
+    RehashCleanup,
 }
 
 impl AuditOperation {
@@ -55,6 +56,7 @@ impl AuditOperation {
             Self::CustodianDecrypt => "custodian_decrypt",
             Self::RehashRow => "rehash_row",
             Self::RehashRun => "rehash_run",
+            Self::RehashCleanup => "rehash_cleanup",
         }
     }
 }
@@ -337,6 +339,11 @@ pub fn rehash_row_audit(
         .merchant(merchant_id)
         .customer(customer_id)
         .resource(locker_id)
+}
+
+/// Entry written before the re-hash job deletes the unused hash rows at the end of a complete run.
+pub fn rehash_cleanup_audit(tenant_id: &str) -> PendingAudit {
+    PendingAudit::new(tenant_id, None, AuditOperation::RehashCleanup)
 }
 
 /// Entry for one run of the re-hash job. It takes no row data.
