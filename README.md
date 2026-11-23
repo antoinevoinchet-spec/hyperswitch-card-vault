@@ -42,6 +42,12 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `tests/vault_e2e.rs`: two end-to-end tests (one row for a card stored by two merchants; the stored value is not a plain SHA-512).
   - `docs/tokenization.md`: describes the keyed hash, what happens to rows written before it, and updated line references.
   - `docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md` and `docs/superpowers/plans/2026-11-23-keyed-card-hash.md`: design and implementation plan.
+- Threat model table (each protection linked to the test that proves it, each known limit to the text that describes it):
+  - `docs/threat-model.md`: new table of threats, attacks, controls, evidence and status.
+  - `scripts/check-threat-model.sh`: new script that checks that every test, line and demo check cited in the table exists.
+  - `.github/workflows/CI-pr.yml`: added the `threat-model` job, which runs that script on every pull request; existing jobs are unchanged.
+  - `docs/tokenization.md`: added a link to the table.
+  - `docs/superpowers/specs/2026-11-23-threat-model-table-design.md` and `docs/superpowers/plans/2026-11-23-threat-model-table.md`: design and implementation plan.
 
 ## Demo
 
@@ -51,6 +57,9 @@ printed with checks proving that it never holds the card number or a key. It nee
 14 or later, `jq`, `curl` and `openssl`, and leaves nothing behind. Each step is explained in
 [demo/README.md](./demo/README.md). What the vault already does for tokenization is described in
 [docs/tokenization.md](./docs/tokenization.md).
+
+Which protections are proven, by which test, and which limits are still open: see the
+[threat model table](./docs/threat-model.md).
 
 ## Overview
 

@@ -140,6 +140,16 @@ jobs:
       - name: Spell check
         uses: crate-ci/typos@master
 
+  threat-model:
+    name: Threat model references
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Check the threat model table
+        run: ./scripts/check-threat-model.sh
+
   integration-db:
     name: End-to-end tests and demo against PostgreSQL
     runs-on: ubuntu-latest
