@@ -37,6 +37,8 @@ pub enum AuditOperation {
     RehashRow,
     RehashRun,
     RehashCleanup,
+    MasterKeyRotationRow,
+    MasterKeyRotationRun,
 }
 
 impl AuditOperation {
@@ -57,6 +59,8 @@ impl AuditOperation {
             Self::RehashRow => "rehash_row",
             Self::RehashRun => "rehash_run",
             Self::RehashCleanup => "rehash_cleanup",
+            Self::MasterKeyRotationRow => "master_key_rotation_row",
+            Self::MasterKeyRotationRun => "master_key_rotation_run",
         }
     }
 }
@@ -351,6 +355,17 @@ pub fn rehash_run_audit(tenant_id: &str) -> PendingAudit {
     PendingAudit::new(tenant_id, None, AuditOperation::RehashRun)
 }
 
+/// Entry for one `merchant` row rewritten by the master key rotation, written before the change.
+/// It holds the merchant id only.
+pub fn master_key_rotation_row_audit(tenant_id: &str, merchant_id: &str) -> PendingAudit {
+    PendingAudit::new(tenant_id, None, AuditOperation::MasterKeyRotationRow).merchant(merchant_id)
+}
+
+/// Entry for one run of the master key rotation, its outcome included. It takes no row data.
+pub fn master_key_rotation_run_audit(tenant_id: &str) -> PendingAudit {
+    PendingAudit::new(tenant_id, None, AuditOperation::MasterKeyRotationRun)
+}
+
 /// Entry for `/key/transfer`. The request only holds a batch size, so no identifier is kept.
 pub fn key_transfer_audit(tenant_id: &str, request_id: Option<String>) -> PendingAudit {
     PendingAudit::new(tenant_id, request_id, AuditOperation::KeyTransfer)
@@ -608,6 +623,23 @@ mod tests {
 
         let run = rehash_run_audit("public").finish(&Ok::<(), ContainerError<ApiError>>(()));
         assert_eq!(run.operation, "rehash_run");
+        assert_eq!(run.merchant_id, None);
+    }
+
+    #[test]
+    fn master_key_rotation_entries_have_ids_only() {
+        let entry = master_key_rotation_row_audit("public", "merchant_abc")
+            .finish(&Ok::<(), ContainerError<ApiError>>(()));
+
+        assert_eq!(entry.operation, "master_key_rotation_row");
+        assert_eq!(entry.merchant_id.as_deref(), Some("merchant_abc"));
+        assert_eq!(entry.customer_id, None);
+        assert_eq!(entry.resource_id, None);
+        assert_eq!(entry.request_id, None);
+
+        let run =
+            master_key_rotation_run_audit("public").finish(&Ok::<(), ContainerError<ApiError>>(()));
+        assert_eq!(run.operation, "master_key_rotation_run");
         assert_eq!(run.merchant_id, None);
     }
 
