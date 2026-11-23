@@ -28,9 +28,15 @@ diesel against a throwaway PostgreSQL.
 - Every `gh pr` or `gh issue` command passes `-R antoinevoinchet-spec/hyperswitch-card-vault`. The one
   read of `juspay/*` is the owner's own final check (`gh pr list -R juspay/hyperswitch-card-vault --author antoinevoinchet-spec --state all`).
 - Repository text in English; no word `typos` reads as a misspelling. Forbidden wording: the pattern
-  file `$SCRATCH/forbidden.txt` (kept outside the repository, see the project `CLAUDE.md`, "No
-  compliance claim"); `git diff main | grep '^+' | grep -i -f "$SCRATCH/forbidden.txt"`, the same on
-  `git log main..HEAD --format=%B` and on the PR text, returns nothing.
+  file `$SCRATCH/forbidden.txt` (7 patterns, kept outside the repository, see the project `CLAUDE.md`,
+  its rule on what may be said about the project; checked on 2026-11-23 to catch a test sentence, exit 0).
+  `test -s "$SCRATCH/forbidden.txt"` first (a missing file would make `grep -f` exit 2, not 1); then
+  `git diff main | grep '^+' | grep -i -f "$SCRATCH/forbidden.txt"`, the same on
+  `git log main..HEAD --format=%B` and on the PR text, must exit 1 (no match); a match is accepted only
+  in a sentence that denies the claim, and is quoted in the report.
+- Pinning check for every new or changed workflow file:
+  `grep -n 'uses:' <file> | grep -v -E '@[0-9a-f]{40} # '` prints only the lines of existing jobs
+  (for `CI-pr.yml`, compare with `main`); seen failing once on a temporary `@v7` in Task 3 step 3.
 - `docs/threat-model.md`, `docs/tokenization.md` and `README.md` never contain `GHSA` or `advisories`:
   write "known vulnerabilities", "RustSec database", and cite `deny.toml` by line numbers, never by
   the name of its section, nor the `cargo deny` command line.
@@ -52,8 +58,10 @@ diesel against a throwaway PostgreSQL.
   (owner's Q1 = A). A duration such as `P90D` counts from each entry's publication: not used.
 - Stops for the owner's yes (DOING / EXPECT / IF WRONG first): each deliberate breakage in `src/`
   (Task 1 step 4, Task 2 step 3); installing a tool; editing a file outside the allowed list (the
-  breakage branch); **each push** (commits are grouped, one push per stop); each PR; widening the
-  allowed licenses, registries or git sources beyond Task 4 step 1; each merge or branch deletion.
+  breakage branch); **each push** (commits are grouped, one push per stop; the first push of a branch
+  and the PR it opens form one stop, as the owner's point 4 defines it; marking the PR ready goes with
+  the push before it); each branch deletion (closing its PR goes with it); each merge; widening the allowed licenses, registries or git
+  sources, or loosening `required-git-spec`, beyond Task 4 step 1; any GitHub setting.
 - Local PostgreSQL: throwaway cluster, TCP only, port 54330 (Task 1 step 1), stopped and deleted at
   the end of each task that starts it.
 
@@ -178,13 +186,17 @@ diesel against a throwaway PostgreSQL.
 
 - [ ] **Step 2: Add job `rehash-kv`**, name "Re-hash refusal with the kv feature": same shape, run
   `cargo test --features key_custodian,kv --test vault_e2e rehash_refuses_to_run_with_kv -- --exact`,
-  guard on `test result: ok. 1 passed`.
+  guard `grep -q 'test result: ok. 1 passed' test-output.txt || { echo "::error::expected 1 kv test"; exit 1; }`.
 
 - [ ] **Step 3: Check the file and the guard.**
   - `git diff main -- .github/workflows/CI-pr.yml` shows only added lines after the last existing job.
   - `python3 -I -c 'import sys, yaml; yaml.safe_load(open(sys.argv[1]))' .github/workflows/CI-pr.yml` exits 0.
-  - Guard seen failing: run the job's two shell lines locally with the filter `rehash_zzz` (no test
-    matches). Expected: `expected 11 re-hash tests`, exit 1 (output kept).
+  - Guards seen failing: run each job's shell lines locally with the filter `rehash_zzz` (no test
+    matches): expected `expected 11 re-hash tests` and `expected 1 kv test`, exit 1 (outputs kept).
+    The counts are fixed on purpose: adding a `rehash_` test means updating the guard (comment in the
+    workflow says so).
+  - Pinning check (Global Constraints) on `CI-pr.yml`; once with a temporary `@v7` on a new step:
+    the line is printed; reverted.
 
 - [ ] **Step 4: Commit**: `ci: run the re-hash tests without key_custodian and with kv`.
 
@@ -234,7 +246,9 @@ diesel against a throwaway PostgreSQL.
   `jq -r '.checks[] | "| \(.name) | \(.score) |"' "$RESULTS"` to `$GITHUB_STEP_SUMMARY` and fails if
   `jq '.checks | length' "$RESULTS"` is 0 or the file is missing.
 - [ ] **Step 2: Checks**: `grep -n 'publish_results: false' .github/workflows/scorecard.yml` prints one
-  line; `grep -c 'id-token' .github/workflows/scorecard.yml` prints 0; YAML parses.
+  line; `grep -c 'id-token' .github/workflows/scorecard.yml` prints 0; YAML parses; pinning check
+  (Global Constraints) on this file and on `dependencies.yml`. The summary step's shell lines, run
+  locally on `echo '{"checks":[]}' > "$SCRATCH/empty.json"` and on a missing file, exit 1 both times.
 - [ ] **Step 3: Commit**: `ci: run OpenSSF Scorecard without publishing its results`.
 - [ ] **Fallback, only if the action refuses this fork in Task 7**: replace the action step by the
   `ghcr.io/ossf/scorecard` image pinned by digest, arguments `--repo=github.com/${{ github.repository }}
@@ -250,8 +264,9 @@ diesel against a throwaway PostgreSQL.
 - Modify: `docs/threat-model.md`, `docs/tokenization.md`, `README.md`
 
 - [ ] **Step 1: Table.**
-  - T28: add `rehash_refuses_to_run_with_kv`, and the note that the re-hash tests also run without
-    `key_custodian` (CI job "Re-hash without the key_custodian feature"); write that under `kv` only
+  - T28: add `rehash_refuses_to_run_with_kv`, and the note that `rehash_moves_v1_rows_to_scoped_hashes`
+    and the other re-hash tests also run without `key_custodian` (CI job "Re-hash without the
+    key_custodian feature"); write that under `kv` only
     two of the job's six refusals are on the tested path (no card stored), the other four being
     compiled only. Stays `proven` for what it claims.
   - T31 (`not tested`): a dependency with a known vulnerability, an unapproved license or an unapproved
@@ -259,12 +274,12 @@ diesel against a throwaway PostgreSQL.
     `.github/workflows/dependencies.yml`; evidence: the CI job "Dependencies"; "breakage run to be
     recorded" until Task 8 step 5; no test in the repository repeats it.
   - T32 (`open`): known vulnerabilities of the original code, tolerated until 2027-02-21; evidence: the
-    `deny.toml` lines that list them (added in Task 7 step 3).
+    `deny.toml` policy comment lines (written in Task 4); the list lines are added in Task 7 step 3.
   - T33 (`open`): crates taken from git are not covered by the RustSec database; evidence: the
     `deny.toml` comment lines that say it.
   - T34 (`open`): existing workflows use moving tags (`@master`, `@v7`); evidence: their `CI-pr.yml`
     lines; Scorecard reports it.
-  - T30 unchanged and `open`; no new T22 row.
+  - T22 and T30 keep their status and text; only their moved `file:line` references may change.
   - Update "How to check it yourself" (the run without custodians, the `kv` test). Fix every moved
     `file:line`.
 - [ ] **Step 2: `docs/tokenization.md`**: remove the `kv` refusal and the run without `key_custodian`
@@ -274,9 +289,12 @@ diesel against a throwaway PostgreSQL.
 - [ ] **Step 4: Checks**:
   - `scripts/check-threat-model.sh` exits 0; report its `OK: <n> rows (...)` line.
   - `grep -c -i -E 'GHSA|advisories' docs/threat-model.md README.md docs/tokenization.md` → 0 each.
-  - `for f in $(git diff --name-only main); do [ "$f" = README.md ] || grep -q -F -- "$f" README.md || echo "MISSING $f"; done`
-    prints nothing.
-  - `git diff main -- docs/threat-model.md | grep -E '^[-+]\| T(22|30) '` prints nothing.
+  - `grep -c -i 'scorecard.dev/projects\|api.scorecard.dev' README.md` → 0.
+  - README coverage, on the "Changes from the original" section only:
+    `sed -n '/^### Changes from the original/,/^## /p' README.md > "$SCRATCH/changes.md"; for f in $(git diff --name-only main); do [ "$f" = README.md ] || grep -q -F -- "$f" "$SCRATCH/changes.md" || echo "MISSING $f"; done`
+    prints nothing; seen once printing `MISSING deny.toml` on a copy of the section without that line.
+  - `git diff main -- docs/threat-model.md | grep -E '^[-+]\| T(22|30) '`: any line shown differs only
+    by a `file:line` reference.
   - Forbidden wording (Global Constraints) → nothing.
 - [ ] **Step 5: Commit**: `docs: describe the dependency check, Scorecard and the re-hash feature paths`.
 
@@ -287,7 +305,8 @@ diesel against a throwaway PostgreSQL.
 - [ ] **Step 1: Stop for the owner's yes**: push `chore/hygiene` and open a draft PR, base `main`,
   `-R antoinevoinchet-spec/hyperswitch-card-vault`, title and body shown first.
 - [ ] **Step 2: Read the run.** Expected: "Dependencies" fails with `vulnerability` diagnostics for
-  crates of the original code (`ignore` is empty), and those only; the two re-hash jobs pass with
+  crates of the original code (`ignore` is empty), plus possibly unmaintained or unsound notices on
+  direct dependencies, which are listed the same way in step 3; the two re-hash jobs pass with
   `11 passed` and `1 passed`; "Scorecard" passes with a results artifact. Record each run link. If
   the license or source checks reject anything, stop and ask before changing `allow`,
   `allow-registry` or `allow-git` (the root crate's `LICENSE` file, if reported unlicensed, gets a
@@ -307,8 +326,9 @@ diesel against a throwaway PostgreSQL.
   from `chore/hygiene` with one commit: `Cargo.toml` adds `smallvec = "=0.6.13"` (crates.io release
   with a known buffer overflow, fixed in 0.6.14) and `smallvec-git = { package = "smallvec", git =
   "https://github.com/servo/rust-smallvec", tag = "v1.13.2" }` (a source outside `allow-git`);
-  `Cargo.lock` regenerated by `cargo generate-lockfile` limited to these additions
-  (`cargo update -p smallvec` if needed); `deny.toml` drops `"Zlib"` from `allow` and sets one
+  `Cargo.lock` updated by `cargo update -p smallvec` only (no `cargo generate-lockfile`, which would
+  resolve every crate again), then `git diff Cargo.lock` shows only the added packages; `deny.toml` drops `"Zlib"`
+  from `allow` (`foldhash` and `zlib-rs` are Zlib only, so the license check must fail) and sets one
   exception's `expiry` to `2026-11-01`; `scorecard.yml` sets `RESULTS: missing.json` in the summary
   step; the guard of `rehash-without-custodian` uses the filter `rehash_zzz`.
 - [ ] **Step 2: Stop for the owner's yes**: push it and open a draft PR with base `chore/hygiene`

@@ -69,7 +69,7 @@ proven by a test, a CI job or a command that fails when the control it describes
   with a command that does not read its input (`tests/vault_e2e.rs:838-843`). `tests/vault_e2e.rs` is
   compiled only with `key_custodian` (line 7).
 - Scorecard: the repository is a GitHub fork (`isFork: true`). The action's README says a fork is "not
-  supported" and that `pull_request` is "experimental"; its option check (`options/options.go`, tag
+  supported" and that `pull_request` is "experimental"; its option check (`options/options.go`, read at tags `v2.5.0`, the one pinned, and
   `v2.6.0`) only refuses an empty token and a non-default branch outside `pull_request`.
 
 ## Approaches considered
