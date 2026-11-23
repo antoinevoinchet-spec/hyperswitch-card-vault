@@ -1,7 +1,7 @@
 # Threat model table: design
 
-Date: 2026-11-23. Branch: `chore/threat-model-table` (from `main`, `7d1bdfb`). Status: draft, owner
-decisions Q1 to Q3 pending.
+Date: 2026-11-23. Branch: `chore/threat-model-table` (from `main`, `7d1bdfb`). Status: owner
+decisions Q1 to Q3 taken; waiting for approval of the design.
 
 ## Intent
 
@@ -52,10 +52,10 @@ Research report reused: the owner's 2026-11-23 research note on the fork's next 
   every file changed on the branch.
   Verifiable by: `git diff --name-only main` compared with the list.
 - **D8** No code changes: `src/`, `tests/`, `demo/`, migrations, `config/`, `Cargo.toml`,
-  `Cargo.lock`, `LICENSE`, `.typos.toml`, `CLAUDE.md` untouched; `.github/workflows/` only if the
-  owner approves Q2.
+  `Cargo.lock`, `LICENSE`, `.typos.toml`, `CLAUDE.md` untouched; in `.github/workflows/`, only the
+  new job approved in Q2.
   Verifiable by: `git diff --name-only main -- src tests demo config migrations Cargo.toml
-  Cargo.lock .github CLAUDE.md .typos.toml LICENSE` prints nothing (or only the approved workflow).
+  Cargo.lock .github CLAUDE.md .typos.toml LICENSE` prints only `.github/workflows/CI-pr.yml`, and its diff adds one job and changes no existing line.
 - **D9** Non-regression: `cargo test -j 4` passes with at least 38 tests, and `make demo` prints
   `DEMO OK`.
   Verifiable by: the last lines of both commands.
@@ -81,7 +81,7 @@ Research report reused: the owner's 2026-11-23 research note on the fork's next 
 
 ## Approaches considered
 
-1. **One table, one row per threat, with a checker script (chosen, pending Q1 on columns).** Every
+1. **One table, one row per threat, with a checker script (chosen).** Every
    row carries its own evidence; the script makes the references self-checking. Cost: a wide table.
 2. **Two tables, "protections" and "open limits".** Easier to read, but a limit and the protection it
    weakens end up far apart (for example the keyed hash and the master key that must stay secret).
@@ -89,9 +89,9 @@ Research report reused: the owner's 2026-11-23 research note on the fork's next 
    give the two-minute overview the owner asked for, and a script cannot easily tell which test backs
    which claim.
 
-## Table format (pending Q1)
+## Table format (Q1 decided)
 
-Proposed columns, in this order:
+Columns, in this order:
 
 | Column | Content |
 |---|---|
@@ -165,11 +165,16 @@ if anything failed. It reads no `.env` file and no configuration.
 
 ## Decisions for the owner
 
-- **Q1** Columns of the table (above, or a shorter variant). Pending.
-- **Q2** Whether CI runs the script on every PR (needs one step in `.github/workflows/CI-pr.yml`).
-  Pending.
+- **Q1** Columns of the table. Decided on 2026-11-23: the six columns above (`ID`, `Threat`,
+  `Attack`, `Control`, `Evidence`, `Status`), preferred over a four-column variant that merged threat
+  with attack and control with evidence.
+- **Q2** Whether CI runs the script on every PR. Decided on 2026-11-23: yes, as a new job
+  `Threat model references` in `.github/workflows/CI-pr.yml` that runs only the script (no Rust
+  build); existing jobs unchanged. The exact lines are shown to the owner before they are written.
 - **Q3** Whether to install `cargo-mutants` and report a mutation score for `sha.rs` and `audit.rs`.
-  Pending.
+  Decided on 2026-11-23: not in this ticket, but to be done later (see "Later work"). Reason: the
+  tests that best protect `src/audit.rs` need PostgreSQL, which a plain mutation run would not
+  start, so the published score would be misleadingly low.
 
 ## Calls made by the builder
 
@@ -177,6 +182,13 @@ if anything failed. It reads no `.env` file and no configuration.
 - A row that a test proves only at the primitive level says so in its threat text (T12).
 - `docs/tokenization.md` keeps its own references; the script checks only the table (checking the
   whole doc is a later option).
+
+## Later work (decided, not in this ticket)
+
+- Mutation score with `cargo-mutants` on `src/crypto/hash_manager/managers/sha.rs` and
+  `src/audit.rs` (owner decision Q3), with the end-to-end tests running against PostgreSQL so that
+  they count, `-j 1` on the 8 GB Mac. Each surviving mutant becomes an `open` row of the table.
+- I6 (scope of the duplicate check), as already ordered by the owner.
 
 ## Non-goals
 
