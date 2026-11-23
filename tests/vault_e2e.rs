@@ -693,7 +693,7 @@ async fn stored_card_hash_is_not_a_plain_sha512() {
     let master_key = GcmAes256::new(custodian_key)
         .decrypt(hex::decode(&keys.master_key).expect("encrypted master key"))
         .expect("decrypt master key");
-    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key))
+    let expected = CardDedupHmac::from_master_key(&Secret::new(master_key), MERCHANT, CUSTOMER)
         .expect("derive dedup key")
         .encode(hashed_bytes.into_bytes())
         .expect("keyed hash");

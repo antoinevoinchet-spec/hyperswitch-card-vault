@@ -142,7 +142,11 @@ mod tests {
     fn get_hash_keys_the_enc_card_data_branch() {
         let key = Secret::new(generate_aes256_key().to_vec());
         let hash = |request: &types::Data| {
-            get_hash(request, CardDedupHmac::from_master_key(&key).unwrap()).unwrap()
+            get_hash(
+                request,
+                CardDedupHmac::from_master_key(&key, "merchant-1", "customer-1").unwrap(),
+            )
+            .unwrap()
         };
         let enc = data(serde_json::json!({ "enc_card_data": "4111111111111111" }));
         let card = data(serde_json::json!({ "card": { "card_number": "4111111111111111" } }));
@@ -151,7 +155,7 @@ mod tests {
         assert_eq!(first.len(), 64);
         assert_eq!(first, hash(&enc));
         // get_hash hashes the JSON-serialised string with the algorithm it is given.
-        let expected = CardDedupHmac::from_master_key(&key)
+        let expected = CardDedupHmac::from_master_key(&key, "merchant-1", "customer-1")
             .unwrap()
             .encode(serde_json::to_vec("4111111111111111").unwrap())
             .unwrap();
