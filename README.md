@@ -25,6 +25,15 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `src/routes/data.rs`, `src/routes/routes_v2/data.rs`, `src/routes/entity.rs`, `src/routes/key_migration.rs`, `src/routes/key_custodian.rs`: each handler records its operation.
   - `docs/superpowers/specs/2026-11-20-audit-log-design.md` and `docs/superpowers/plans/2026-11-20-audit-log.md`: design and implementation plan.
 
+## Demo
+
+`make demo` shows the vault in a few seconds once built: two custodians unlock it (one wrong key
+first), a public test card is stored, read back, fingerprinted and deleted, and the audit log is
+printed with checks proving that it never holds the card number or a key. It needs Rust, PostgreSQL
+14 or later, `jq`, `curl` and `openssl`, and leaves nothing behind. Each step is explained in
+[demo/README.md](./demo/README.md). What the vault already does for tokenization is described in
+[docs/tokenization.md](./docs/tokenization.md).
+
 ## Overview
 
 The Hyperswitch Card Vault is a highly performant and a secure vault to save sensitive data such as payment card details, bank account details etc.
