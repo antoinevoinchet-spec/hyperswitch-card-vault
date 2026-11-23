@@ -1,5 +1,5 @@
 pub mod crypto_operation;
-mod transformers;
+pub(crate) mod transformers;
 pub mod types;
 
 use std::sync::Arc;
