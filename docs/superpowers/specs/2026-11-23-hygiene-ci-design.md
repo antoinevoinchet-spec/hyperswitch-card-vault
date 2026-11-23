@@ -12,7 +12,7 @@ proven by a test, a CI job or a command that fails when the control it describes
 
 ## Requirements
 
-- D1. A CI check of the Rust dependencies: known vulnerabilities (RustSec database), licences, and
+- D1. A CI check of the Rust dependencies: known vulnerabilities (RustSec database), licenses, and
   the sources crates come from. Verifiable by: the job passes on the PR, and fails on a breakage
   branch that adds a crate with a known vulnerability or from an unapproved source (output shown).
 - D2. OpenSSF Scorecard in CI, without a public badge and without publishing its results. Verifiable
@@ -50,10 +50,10 @@ proven by a test, a CI job or a command that fails when the control it describes
 
 - Dependencies (`cargo metadata --all-features --locked`): 755 crates from crates.io, 12 from two git
   repositories (`github.com/juspay/hyperswitch` by tag, `github.com/juspay/framework-libs-rs` by
-  revision), all licensed Apache-2.0. Licences seen: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
+  revision), all licensed Apache-2.0. Licenses seen: MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception,
   Unicode-3.0, ISC, BSD-2-Clause, BSD-3-Clause, Zlib, CC0-1.0 (`tiny-keccak`), MPL-2.0
   (`webpki-roots`), OpenSSL (`aws-lc-sys`); the others appear only as an alternative to MIT or
-  Apache-2.0. The root crate declares no licence in `Cargo.toml`; its `LICENSE` file is Apache-2.0.
+  Apache-2.0. The root crate declares no license in `Cargo.toml`; its `LICENSE` file is Apache-2.0.
 - Known vulnerabilities (OSV query of the locked crate versions, 2026-11-23, to be confirmed by the
   tool itself in CI): 11 crates of the default build graph and 13 more under `--all-features` match a
   RustSec vulnerability entry (among them `rustls`, `rustls-webpki`, `h2`, `openssl`, `aws-lc-sys`,
@@ -76,10 +76,10 @@ proven by a test, a CI job or a command that fails when the control it describes
 
 ### Dependencies
 
-1. **cargo-deny** (chosen): one tool and one `deny.toml` for vulnerabilities, licences and sources.
+1. **cargo-deny** (chosen): one tool and one `deny.toml` for vulnerabilities, licenses and sources.
    Since 0.21.0, an ignored entry can carry a `reason` and an `expiry` date, after which it fails
    again.
-2. cargo-audit: vulnerabilities only; licences and sources would need a second tool.
+2. cargo-audit: vulnerabilities only; licenses and sources would need a second tool.
 3. Both: duplicates the vulnerability check for no gain.
 
 ### Testing the two re-hash paths
@@ -116,14 +116,14 @@ proven by a test, a CI job or a command that fails when the control it describes
   - `[advisories]`: every vulnerability fails; unmaintained and unsound notices keep the tool's
     default (`workspace`: they fail only for a direct dependency). The handling of entries already
     present in the original code is decision **Q1** below.
-  - `[licenses]`: an explicit allow list of the licences seen above; any other licence fails. The
+  - `[licenses]`: an explicit allow list of the licenses seen above; any other license fails. The
     root crate is clarified as Apache-2.0 from its `LICENSE` file (hash pinned), without touching
     `Cargo.toml`.
   - `[sources]`: crates.io only as registry (`unknown-registry = "deny"`); git sources limited to the
     two exact URLs above (`unknown-git = "deny"`), each pinned at least by a tag
     (`required-git-spec = "tag"`).
 - Known limit, kept `open` in the table: the RustSec database describes crates.io releases, so the
-  12 crates taken from git are checked for their source and licence, not for vulnerabilities.
+  12 crates taken from git are checked for their source and license, not for vulnerabilities.
 
 ### Scorecard (D2, D5)
 
@@ -179,7 +179,7 @@ proven by a test, a CI job or a command that fails when the control it describes
 ### Table and pages (D6)
 
 - `docs/threat-model.md`: T28 cites the two new tests; new rows for a new dependency with a known
-  vulnerability, an unapproved licence or source (control in `deny.toml`; status `not tested`,
+  vulnerability, an unapproved license or source (control in `deny.toml`; status `not tested`,
   because the breakage run is a one-off and the check script counts only test functions and demo
   checks); the original code's known vulnerabilities (`open`, citing `deny.toml`); git dependencies
   not covered by the RustSec database (`open`); existing workflow actions on moving tags (`open`).
@@ -199,7 +199,7 @@ proven by a test, a CI job or a command that fails when the control it describes
     seen as a failure.
   - C: blocking with no exception: every PR stays red until the original dependencies are updated,
     which is out of this ticket.
-  - Answer: pending.
+  - Answer (owner, 2026-11-23): A, with an expiry of 90 days, that is 2027-02-21.
 
 ## Left to the builder
 
