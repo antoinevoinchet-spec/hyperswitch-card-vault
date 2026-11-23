@@ -308,3 +308,104 @@ async fn retrieve_fails_closed_when_audit_table_is_unwritable() {
     assert_eq!(status, 500);
     assert!(!body.contains(CARD_NUMBER));
 }
+
+async fn send_key(vault: &Vault, step: &str, key: &str) -> u16 {
+    vault
+        .post(
+            &format!("/custodian/{step}"),
+            serde_json::json!({ "key": key }),
+        )
+        .await
+        .0
+}
+
+fn custodian_rows(db: &TestDb) -> Vec<(String, String, i16)> {
+    db.audit_rows()
+        .into_iter()
+        .filter(|row| row.operation.starts_with("custodian_"))
+        .map(|row| (row.operation, row.outcome, row.status_code))
+        .collect()
+}
+
+#[tokio::test]
+async fn custodian_steps_write_audit_rows() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    // A wrong key of the right shape (16 bytes as hex) reaches the handler.
+    let wrong_key2 = uuid::Uuid::now_v7().simple().to_string();
+
+    assert_eq!(send_key(&vault, "key1", &keys.key1).await, 200);
+    assert_eq!(send_key(&vault, "key1", &keys.key1).await, 200);
+    assert_eq!(send_key(&vault, "key2", &wrong_key2).await, 200);
+    let (status, _) = vault
+        .post("/custodian/decrypt", serde_json::json!({}))
+        .await;
+    assert_ne!(status, 200, "decrypt with a wrong key");
+    assert_eq!(send_key(&vault, "key2", &keys.key2).await, 200);
+    let (status, _) = vault
+        .post("/custodian/decrypt", serde_json::json!({}))
+        .await;
+    assert_eq!(status, 200, "decrypt with the right keys");
+
+    let rows = custodian_rows(&db);
+    let summary: Vec<_> = rows
+        .iter()
+        .map(|(operation, outcome, status)| (operation.as_str(), outcome.as_str(), *status == 200))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("custodian_key1", "success", true),
+            ("custodian_key1", "success", true),
+            ("custodian_key2", "success", true),
+            ("custodian_decrypt", "failure", false),
+            ("custodian_key2", "success", true),
+            ("custodian_decrypt", "success", true),
+        ]
+    );
+    for row in db.audit_rows() {
+        for secret in [&keys.key1, &keys.key2, &keys.master_key, &wrong_key2] {
+            assert!(
+                !row.text.contains(secret.as_str()),
+                "a key reached audit_log"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn custodian_key_is_refused_when_audit_table_is_unwritable() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+
+    db.exec("ALTER TABLE audit_log RENAME TO audit_log_blocked");
+    let key1_status = send_key(&vault, "key1", &keys.key1).await;
+    db.exec("ALTER TABLE audit_log_blocked RENAME TO audit_log");
+    assert_eq!(
+        key1_status, 500,
+        "key1 must be refused without its audit row"
+    );
+
+    assert_eq!(send_key(&vault, "key2", &keys.key2).await, 200);
+    let (status, _) = vault
+        .post("/custodian/decrypt", serde_json::json!({}))
+        .await;
+    assert_ne!(status, 200, "key1 was not kept, so decrypt must fail");
+
+    let rows = custodian_rows(&db);
+    let summary: Vec<_> = rows
+        .iter()
+        .map(|(operation, outcome, _)| (operation.as_str(), outcome.as_str()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            ("custodian_key2", "success"),
+            ("custodian_decrypt", "failure"),
+        ]
+    );
+}

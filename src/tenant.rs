@@ -16,6 +16,10 @@ pub struct GlobalAppState {
     pub tenants_app_state: RwLock<FxHashMap<String, Arc<TenantAppState>>>,
     #[cfg(feature = "key_custodian")]
     pub tenants_key_state: RwLock<FxHashMap<String, CustodianKeyState>>,
+    /// Audit-only storage per tenant, usable before the tenant is unlocked, so custodian steps can
+    /// write their audit row. Created on the tenant's first custodian call.
+    #[cfg(feature = "key_custodian")]
+    pub tenants_audit_store: RwLock<FxHashMap<String, Arc<crate::storage::Storage>>>,
     pub api_client: ApiClient,
     pub known_tenants: HashSet<String>,
     pub global_config: GlobalConfig,
@@ -114,6 +118,8 @@ impl GlobalAppState {
             tenants_app_state: RwLock::new(tenants_app_state),
             #[cfg(feature = "key_custodian")]
             tenants_key_state: RwLock::new(tenants_key_state),
+            #[cfg(feature = "key_custodian")]
+            tenants_audit_store: RwLock::new(FxHashMap::default()),
             api_client: api_client.clone(),
             known_tenants: HashSet::<String>::from_iter(known_tenants),
             global_config,
@@ -178,6 +184,50 @@ impl GlobalAppState {
                 }
             })
             .await;
+    }
+
+    /// Storage used to write the audit rows of custodian steps, before the tenant is unlocked. It
+    /// only needs the database settings, which the custodian keys do not protect. If it cannot be
+    /// created, the step fails like any other failed audit write.
+    #[cfg(feature = "key_custodian")]
+    pub async fn custodian_audit_store(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Arc<crate::storage::Storage>, crate::error::ContainerError<ApiError>> {
+        if let Some(store) = self.tenants_audit_store.read().await.get(tenant_id) {
+            return Ok(Arc::clone(store));
+        }
+
+        let mut stores = self.tenants_audit_store.write().await;
+        if let Some(store) = stores.get(tenant_id) {
+            return Ok(Arc::clone(store));
+        }
+
+        let schema = &self
+            .global_config
+            .tenant_secrets
+            .get(tenant_id)
+            .ok_or(ApiError::TenantError("Invalid x-tenant-id"))?
+            .schema;
+
+        let store = crate::storage::Storage::new(
+            &self.global_config.database,
+            None,
+            schema,
+            self.runtime_config_manager.clone(),
+            self.storage_global_store.clone(),
+            #[cfg(feature = "redis")]
+            None,
+        )
+        .await
+        .map_err(|error| {
+            logger::error!(?error, "failed to create the custodian audit storage");
+            ApiError::DatabaseInsertFailed("audit_log")
+        })?;
+
+        let store = Arc::new(store);
+        stores.insert(tenant_id.to_string(), Arc::clone(&store));
+        Ok(store)
     }
 
     #[cfg(feature = "key_custodian")]

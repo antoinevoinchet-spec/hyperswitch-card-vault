@@ -68,22 +68,25 @@ pub async fn key1(
     TenantId(tenant_id): TenantId,
     AuditRequestId(request_id): AuditRequestId,
     Json(payload): Json<CustodianReqPayload>,
-) -> Json<CustodianRespPayload> {
+) -> Result<Json<CustodianRespPayload>, error::ContainerError<error::ApiError>> {
+    // The audit row is written before the key is kept: without its row, the key is refused.
+    let audit_store = global_app_state.custodian_audit_store(&tenant_id).await?;
+    audit::record(
+        &*audit_store,
+        audit::PendingAudit::new(&tenant_id, request_id, audit::AuditOperation::CustodianKey1),
+        Ok(()),
+    )
+    .await?;
+
     let mut key_state = global_app_state.tenants_key_state.write().await;
     key_state
         .entry(tenant_id.to_string())
         .and_modify(|key_state_data| key_state_data.key1 = Some(payload.key));
 
     logger::info!("Received key1");
-    audit::emit_audit_event(
-        audit::AuditOperation::CustodianKey1,
-        &tenant_id,
-        request_id.as_deref(),
-        true,
-    );
-    Json(CustodianRespPayload {
+    Ok(Json(CustodianRespPayload {
         message: "Received Key1".into(),
-    })
+    }))
 }
 
 /// Handler for `/custodian/key2`
@@ -93,22 +96,25 @@ pub async fn key2(
     TenantId(tenant_id): TenantId,
     AuditRequestId(request_id): AuditRequestId,
     Json(payload): Json<CustodianReqPayload>,
-) -> Json<CustodianRespPayload> {
+) -> Result<Json<CustodianRespPayload>, error::ContainerError<error::ApiError>> {
+    // The audit row is written before the key is kept: without its row, the key is refused.
+    let audit_store = global_app_state.custodian_audit_store(&tenant_id).await?;
+    audit::record(
+        &*audit_store,
+        audit::PendingAudit::new(&tenant_id, request_id, audit::AuditOperation::CustodianKey2),
+        Ok(()),
+    )
+    .await?;
+
     let mut key_state = global_app_state.tenants_key_state.write().await;
     key_state
         .entry(tenant_id.to_string())
         .and_modify(|key_state_data| key_state_data.key2 = Some(payload.key));
 
     logger::info!("Received key2");
-    audit::emit_audit_event(
-        audit::AuditOperation::CustodianKey2,
-        &tenant_id,
-        request_id.as_deref(),
-        true,
-    );
-    Json(CustodianRespPayload {
+    Ok(Json(CustodianRespPayload {
         message: "Received Key2".into(),
-    })
+    }))
 }
 
 /// Handler for `/custodian/decrypt`
@@ -118,16 +124,28 @@ pub async fn decrypt(
     TenantId(tenant_id): TenantId,
     AuditRequestId(request_id): AuditRequestId,
 ) -> Result<Json<CustodianRespPayload>, error::ContainerError<error::ApiError>> {
-    let result = decrypt_inner(global_app_state, &tenant_id, request_id.clone()).await;
-    if result.is_err() {
-        audit::emit_audit_event(
-            audit::AuditOperation::CustodianDecrypt,
-            &tenant_id,
-            request_id.as_deref(),
-            false,
-        );
+    let result = decrypt_inner(
+        Arc::clone(&global_app_state),
+        &tenant_id,
+        request_id.clone(),
+    )
+    .await;
+    if result.is_ok() {
+        // The success row is written inside `decrypt_inner`, before the tenant is published.
+        return result;
     }
-    result
+
+    let audit_store = global_app_state.custodian_audit_store(&tenant_id).await?;
+    audit::record(
+        &*audit_store,
+        audit::PendingAudit::new(
+            &tenant_id,
+            request_id,
+            audit::AuditOperation::CustodianDecrypt,
+        ),
+        result,
+    )
+    .await
 }
 
 async fn decrypt_inner(
