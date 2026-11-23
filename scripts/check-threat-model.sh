@@ -8,17 +8,20 @@
 #  2. each row has exactly six cells: ID | Threat | Attack | Control | Evidence | Status;
 #  3. IDs are unique;
 #  4. the status is "proven", "not tested" or "open";
-#  5. every backticked `path:N` or `path:N-M` names an existing file, 1 <= N <= M <= its line count,
-#     and lines N and M are not blank (blank lines inside a cited block are allowed);
-#  6. the Control cell is "none" or cites at least one `path:N`;
-#  7. every backticked snake_case word in the Evidence cell is a test: a "fn <name>(" within the
-#     three lines after #[test] or #[tokio::test] in src/ or tests/;
-#  8. every `demo check "<label>"` in the Evidence cell is printed by demo/run.sh as "<label>:";
+#  5. every backticked `path:N` or `path:N-M` names an existing file inside the repository (no
+#     absolute path, no "..", no environment file), 1 <= N <= M <= its line count, and lines N and M
+#     are not blank (blank lines inside a cited block are allowed); a path:N written without
+#     backticks is refused, since it would not be checked;
+#  6. the Control cell is "none" or cites at least one `path:N`; a "proven" row cites one;
+#  7. every snake_case word in the Evidence cell is backticked, and each is a test: a "fn <name>("
+#     within the three lines after #[test] or #[tokio::test] in src/ or tests/;
+#  8. every `demo check "<label>"` in the Evidence cell is printed by demo/run.sh as "<label>:" and
+#     is one of the checks that make the demo fail (see DEMO_CHECKS);
 #  9. a "proven" row cites a test or a demo check; an "open" row cites the doc or code lines that
 #     describe it;
 # 10. the Attack cell holds no backtick: attacks are described in prose, never as a command;
 # 11. the table has at least 12 rows;
-# 12. the file contains no reference to the private report sent upstream.
+# 12. the file contains neither the word "advisories" nor a GHSA identifier.
 #
 # It proves that references exist, not that they say what the row claims. It reads no secret.
 set -u
@@ -34,6 +37,13 @@ if [ ! -f "$table" ]; then
   echo "table: file not found: $table"
   exit 2
 fi
+
+# Demo checks that make `make demo` fail when they do not match (demo/run.sh, "DEMO FAILED").
+DEMO_CHECKS='audit rows written by the journey
+audit rows match the journey step by step (operation, outcome, status)
+audit rows containing the card number
+locker rows while the card was stored
+generated key values found in this output'
 
 fails=0
 fail() {
@@ -56,6 +66,12 @@ check_refs() {
     [ -n "$ref" ] || continue
     path=${ref%%:*}
     nums=${ref#*:}
+    case /$path/ in
+      //* | */../* | */.env*)
+        fail "$id" "path not allowed: $ref"
+        continue
+        ;;
+    esac
     n=${nums%-*}
     m=${nums#*-}
     if [ ! -f "$path" ]; then
@@ -126,7 +142,15 @@ while IFS= read -r line; do
 
   check_refs "$id" "$line"
 
-  if [ "$control" != none ] && ! has_ref "$control"; then
+  if printf '%s\n' "$line" | sed 's/`[^`]*`//g' | grep -q -E '[A-Za-z0-9_/-]+\.[A-Za-z]+:[0-9]+'; then
+    fail "$id" "file:line must be in backticks"
+  fi
+  if printf '%s\n' "$evidence" | sed 's/`[^`]*`//g' |
+    grep -q -E '(^|[^A-Za-z0-9_])[a-z][a-z0-9]*_[a-z0-9_]+'; then
+    fail "$id" "test name must be in backticks"
+  fi
+
+  if { [ "$control" != none ] || [ "$status" = proven ]; } && ! has_ref "$control"; then
     fail "$id" "control cites no file:line"
   fi
 
@@ -146,10 +170,12 @@ while IFS= read -r line; do
 
   while IFS= read -r label; do
     [ -n "$label" ] || continue
-    if grep -q -F -- "$label:" demo/run.sh; then
-      found=$((found + 1))
-    else
+    if ! grep -q -F -- "$label:" demo/run.sh; then
       fail "$id" "demo check not found: $label"
+    elif ! printf '%s\n' "$DEMO_CHECKS" | grep -q -x -F -- "$label"; then
+      fail "$id" "demo check does not make the demo fail: $label"
+    else
+      found=$((found + 1))
     fi
   done <<<"$(printf '%s\n' "$evidence" | grep -o -E 'demo check "[^"]+"' |
     sed -e 's/^demo check "//' -e 's/"$//')"
@@ -167,7 +193,7 @@ if [ "$rows" -lt 12 ]; then
 fi
 
 if grep -q -i -E 'GHSA|advisories' "$table"; then
-  fail table "forbidden reference to a private report"
+  fail table "forbidden word: GHSA or advisories"
 fi
 
 if [ "$fails" -gt 0 ]; then
