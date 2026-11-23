@@ -52,7 +52,8 @@ the existing vault demonstrable and proven, and closes one known gap in the audi
   the card stays readable (chosen).
 - Custodian audit rows: replaying a log file into the table after a successful unlock (rejected:
   nothing reaches the table if the unlock never succeeds, and it is not fail-closed) versus an audit
-  connection per tenant opened at startup and written before the custodian key is kept (chosen).
+  connection per tenant, created on the first custodian call and written before the custodian key is
+  kept (chosen).
 - Demo database: Docker Compose (rejected by the owner: heavy on an 8 GB machine, long container
   build) versus a throwaway local PostgreSQL cluster (chosen).
 
@@ -81,8 +82,10 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
   7. prints three checks: the number of `audit_log` rows containing the test card number (expected
      0); right after step 6, while the card is stored, the number of `locker` rows (expected at
      least 1) and the number of those whose stored bytes contain the number (expected 0); and the
-     number of server log lines containing it (reported as measured).
-  Exit code 0 only if every step returns its expected status and the first two checks are 0.
+     number of server log lines containing it (reported as measured); and the number of generated
+     custodian or master key values found in the demo's own output (expected 0).
+  Exit code 0 only if every step returns its expected status, the audit and stored-bytes checks are
+  0 (with at least one stored row) and the key check is 0.
 
   Journey (tenant `public`, merchant `demo-merchant`, customer `demo-customer`, card
   `4111111111111111`, a public test number):
@@ -125,8 +128,8 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
   Verifiable by: the files exist; each of the 10 journey steps has a paragraph in `demo/README.md`.
 
 - **E4. Custodian audit rows (resolves D8).** Under `key_custodian`, `GlobalAppState` holds, for each
-  known tenant, an audit-only `Storage` built at startup from the database configuration and the
-  tenant schema, before any unlock. Then:
+  known tenant, an audit-only `Storage` built from the database configuration and the tenant
+  schema, usable before any unlock (created on the tenant's first custodian call, see E5). Then:
   - `/custodian/key1` and `/custodian/key2` write their row through `audit::record` **before** storing
     the key. If the write fails, the response is `DatabaseInsertFailed("audit_log")` (HTTP 500) and
     the key is not kept.
@@ -159,8 +162,9 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
     containing the card number.
   - `retrieve_fails_closed_when_audit_table_is_unwritable`: unlock, store a card, rename `audit_log`
     so inserts fail, retrieve; expects HTTP 500 and a body that does not contain the card number.
-  - `custodian_steps_write_audit_rows`: key1, wrong key2, decrypt (failure), then the right keys and
-    decrypt; finds the five custodian rows with their outcomes.
+  - `custodian_steps_write_audit_rows`: key1 twice, wrong key2, decrypt (failure), then the right
+    key2 and decrypt; finds the six custodian rows with their outcomes (the repeated key1 shows the
+    known limit "a second key1 replaces the first").
   - `custodian_key_is_refused_when_audit_table_is_unwritable`: rename `audit_log`, send key1; expects
     HTTP 500; restore the table, send key2 and decrypt; expects the decrypt to fail because key1 was
     not kept.
@@ -180,7 +184,7 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
 - **E8. Tokenization page.** `docs/tokenization.md`, titled "What the vault already does for
   tokenization", describes the existing behaviour with the PCI SSC tokenization vocabulary (token,
   reversible token, card data vault, mapping, de-tokenization, and the non-reversible fingerprint),
-  taken from the PCI SSC Information Supplement on tokenization, read before writing. Every statement
+  taken from the PCI SSC information supplement on tokenization (2011), read before writing. Every statement
   about the vault cites a test name or a `file:line`. It states what the vault does not do (for
   example format-preserving tokens) without proposing to build it.
   Verifiable by: every paragraph about current behaviour in `docs/tokenization.md` ends with a test
@@ -191,9 +195,9 @@ https://openbao.org/docs/audit/, read on 2026-11-23). This fork goes further for
   | Note | Brought up by the demo or CI? | Handling |
   |---|---|---|
   | M1: card-shaped id redaction also hits ~1 in 10 numeric ids of 13 to 19 digits | No: demo ids are not numeric | Does not block the demo. Left for a later phase; mentioned in the tokenization page limits. |
-  | M2: the D8 limits list omits rate-limited `/delete` and locked-custodian rejections | Yes: the demo runs with `key_custodian`, where data calls before unlock are rejected before the handler | Fixed in this document: see "Known limits" below. Documentation only, no test. |
+  | M2: the D8 limits list omits rate-limited `/delete` and locked-custodian rejections | Yes: the demo runs with `key_custodian`, where data calls before unlock are rejected before the handler | Does not block the demo: it is a documentation gap with no code to test. The full list is now in "Known limits" below and copied into `demo/README.md`. |
   | M3: `decrypt` holds the `tenants_key_state` lock while writing the audit row | No: the demo and tests send one request at a time | Does not block the demo. Unchanged. |
-  | M4: `emit_audit_event` prints `request_id` in Debug format | Yes, indirectly: E4 replaces the function | Fixed by removal (E4); the custodian tests of E6 fail before E4 and pass after. |
+  | M4: `emit_audit_event` prints `request_id` in Debug format | Yes, indirectly: E4 replaces the function | Fixed with tests that failed first: the custodian tests of E6 fail before E4 (no row) and pass after it, where `request_id` is a plain column of the row and the function is removed. |
   | M5: no end-to-end test of route wiring | Yes: the CI job is that test | Fixed by E6. |
   | M6: `#[tracing::instrument]` on v2 inner functions, not v1 | No | Does not block the demo. Unchanged. |
 
