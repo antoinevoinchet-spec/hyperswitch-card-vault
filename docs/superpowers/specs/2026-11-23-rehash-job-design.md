@@ -1,0 +1,223 @@
+# Re-hash job for the duplicate-check hash (R1): design
+
+Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; decisions W1, W2
+and W3 are open for the owner.
+
+## Intent
+
+Since I6 (`docs/superpowers/specs/2026-11-23-merchant-scoped-dedup-design.md`), the duplicate-check
+hash is scoped to the merchant and customer (HKDF context `hyperswitch-card-vault/card-dedup/v2`).
+Hashes written before it, under the tenant-wide `v1` context, are never matched again (T28, `open`):
+
+- a card stored before I6 and added again by the same merchant and customer is stored a second
+  time, without `duplication_check`;
+- the old `locker` rows keep a shared `hash_id`, which still links merchants, and customers of one
+  merchant, for a database reader.
+
+A change of master key would break every hash in the same way (T22, `open`). Decision S2 of I6 asks
+for a reusable job that can be run again without harm, resumes after an interruption, is recorded
+in the audit log, is tested against PostgreSQL, and serves both for `v1` to `v2` and after a change
+of master key. This ticket writes that job, proves each effect with a test that fails on `main`,
+and updates the threat model table. This is a study fork; see `CLAUDE.md` for what may not be
+claimed about it.
+
+Research reused: grand-angle report of 2026-11-23 on this ticket, kept outside the repository (ideas
+I1 to I3 adopted, I5 to I7 rejected, I4 asked as W2). Comparable products, read on 2026-11-23: the
+CipherSweet key rotation guide decides per row whether a row needs work by recomputing it under the
+current key (https://ciphersweet.paragonie.com/php/key-rotation); GitLab runs data migrations as
+idempotent batches over primary-key ranges with an explicit finalisation step
+(https://docs.gitlab.com/development/database/batched_background_migrations/); the AWS Database
+Encryption SDK states that changing a beacon key invalidates every beacon and needs a full
+migration plan (https://docs.aws.amazon.com/database-encryption-sdk/latest/devguide/changing-configuration-and-risks.html).
+None of them settles where such a job should run.
+
+## Current state (read in the code on 2026-11-23)
+
+- The only place that computes the hash is `add_card_inner` (`src/routes/data.rs:117-126`):
+  `CardDedupHmac::from_master_key(master_key, merchant_id, customer_id)`, then
+  `transformers::get_hash`, which hashes the JSON-serialised card number, or the caller's
+  `enc_card_data` string (`src/routes/data/transformers.rs:83-104`).
+- Each `locker` row holds the encrypted card (`enc_data`, encrypted with the merchant's key, itself
+  stored encrypted under the master key) and a `hash_id`. Decrypting it gives a `StoredData`
+  (`CardData(card)` or `EncData(string)`, `src/routes/data/types.rs:228-231`), from which the
+  hashed bytes can be rebuilt exactly as the add route builds them.
+- Constraints: `hash_table.data_hash` is the primary key and `hash_table.hash_id` is unique
+  (migrations of 2026-06-30); `locker` has a unique index on `(hash_id, merchant_id, customer_id)`
+  (migration of 2026-07-13). There is no foreign key between `locker.hash_id` and `hash_table`.
+- Two `v1`-era rows of the same card for the same merchant and customer cannot exist: they would
+  share one `hash_id` and break the unique index. A duplicate is therefore always one row written
+  before a change (I6, or a key change) and one written after it.
+- A delete removes the `locker` row and keeps the `hash_table` row (`src/storage/db.rs:264-307`).
+- The storage traits have no way to list `locker` rows, read a hash row by `hash_id`, update a
+  `locker.hash_id` or delete a hash row (`src/storage.rs:528-580`).
+- The in-memory cache (feature `caching`, on by default) keeps `data_hash` to hash row, never a
+  negative result (`src/storage/caching/hash_table.rs`).
+- Precedent for a maintenance job in this code base: `/key/transfer`
+  (`src/routes/key_migration.rs`), a batch route with a `limit`, recorded in the audit log, mounted
+  only when an external key manager is configured.
+- With the `kv` feature, `locker` and `hash_table` rows may live in Redis before they are drained to
+  PostgreSQL, so a job that reads PostgreSQL alone would miss them.
+
+## Requirements
+
+- **D1** After the job, every `locker` row of the tenant cites a `hash_table` row whose `data_hash`
+  is the `v2` hash recomputed from the current master key, the row's merchant and customer and its
+  decrypted card (except rows handled by W2).
+  Verifiable by: e2e test that writes `v1`-era rows (two merchants, two customers of one merchant,
+  the same card), runs the job, and recomputes each expected value with `CardDedupHmac` in the
+  test; it fails on `main`, where the job does not exist.
+- **D2** After the job, no two `locker` rows of different `(merchant, customer)` pairs share a
+  `hash_id`, and no `hash_table` row that no `locker` row cites, older than the run, remains (so no
+  `v1` row remains).
+  Verifiable by: the same e2e test (distinct hash ids; `legacy` row gone; `hash_table` count).
+- **D3** After the job, a new add of a card stored before I6, by the same merchant and customer,
+  returns `duplication_check` = `duplicated` and stores no copy.
+  Verifiable by: the same e2e test, which first shows the duplicate is missed before the job.
+- **D4** Running the job again on a tenant already processed changes no `locker` or `hash_table`
+  row (only its own audit row is added).
+  Verifiable by: e2e test comparing snapshots of both tables before and after a second run.
+- **D5** An interruption then a resume give the same final state as one complete run: state is
+  never kept by the job itself, it is recomputed from the rows. Covered interruptions: between two
+  batches, after a new hash row is inserted but before the `locker` row is moved, and after the
+  move but before the old hash row is deleted.
+  Verifiable by: e2e test running the same data set on two databases (one complete run; one with
+  the three interrupted states written into the database, then resumed) and comparing a canonical
+  state keyed by fixed card references.
+- **D6** The job writes `audit_log` rows with metadata only (tenant, operation, merchant, customer,
+  card reference, outcome), never a card number, a hash value or a key; one row per changed
+  `locker` row, written before the change, and one row per batch.
+  Verifiable by: e2e test reading every `audit_log` row as text and checking that none contains the
+  card number, the hex of any hash, the master key or either custodian key.
+- **D7** If an audit row cannot be written, the job stops with an error and the `locker` row it was
+  about to change is unchanged.
+  Verifiable by: e2e test that makes `audit_log` unwritable, runs the job, expects HTTP 500 (or a
+  non-zero exit) and unchanged `locker` rows.
+- **D8** The job never writes a card number, a hash value or a key to a log, a response body or an
+  error message. Its output holds counts and a cursor only.
+  Verifiable by: e2e test checking the response body and the vault's log file for the card number
+  and key values; code read: no `logger` call takes decrypted data.
+- **D9** The counts balance: rows examined = already current + moved + handled as duplicate; if
+  they do not, the batch fails before its final clean-up.
+  Verifiable by: unit test on the balance check (the error case required by `CLAUDE.md`).
+- **D10** (T22, per W3) The same job also converges rows whose hash was written under another master
+  key: it only needs the current key, since it compares each cited hash with the recomputed one.
+  Verifiable by: e2e test with hash rows computed in the test under the `v2` derivation of another
+  random master key.
+- **D11** Duplicate of the same card for the same merchant and customer: handled as decided in W2,
+  never by deleting a `locker` row.
+  Verifiable by: e2e test that creates the duplicate the way it happens (a `v1`-era row, then an add
+  after I6) and checks both card references still retrieve the card.
+- **D12** No change visible to callers of the existing routes; no migration, no configuration
+  change, no new dependency; `cargo test -j 4`, the e2e suite and `make demo` still pass.
+  Verifiable by: those commands, and
+  `git diff --name-only main -- demo config migrations src/storage/schema.rs Cargo.toml Cargo.lock .github CLAUDE.md .typos.toml LICENSE scripts`
+  returning nothing.
+- **D13** The threat model table, `docs/tokenization.md` and `README.md` describe the state after
+  R1; every moved `file:line` is corrected and reread.
+  Verifiable by: `scripts/check-threat-model.sh` exit code 0; rows listed under "Table changes".
+
+## Goals, non-goals, anti-goals
+
+- Goal: after one run, rows written before I6 (or before a key change) behave like rows written
+  after it, and no longer link merchants or customers.
+- Non-goals: rotating the master key itself (re-encrypting merchant keys under a new master key);
+  the fingerprint table; the `kv` storage scheme; a dry-run mode; scheduling the job.
+- Anti-goals: hand-written cryptography; deleting a stored card; a lookup that tries `v2` then `v1`
+  (rejected in I6: it keeps the link and the timing difference alive, and after a key change it
+  would need the old key); a version column or a progress table (both need a migration).
+
+## Design
+
+### How one row is processed (the same step makes the job resumable and idempotent)
+
+For each `locker` row L, in `id` order, from a cursor:
+
+1. Decrypt L with its merchant's key (`crypto_operation::decrypt_data`), rebuild the request data
+   from `StoredData`, compute H with `CardDedupHmac` and `get_hash`, exactly as `/data/add` does.
+   The decrypted bytes live only in memory, inside `StrongSecret`, for this step.
+2. Read the hash row of L's `hash_id`. If it exists and its `data_hash` equals H: L is current;
+   nothing is written.
+3. Otherwise read the hash row of H (`find_optional_by_data_hash`):
+   - none: insert it (`hash::insert_or_get`, race-safe);
+   - it exists and another `locker` row of the same merchant and customer cites it: L is a
+     duplicate, handled as W2 decides (if W2 = A and L's `hash_id` already has no hash row, L was
+     detached by an earlier run and is counted as current, so a second run writes nothing).
+4. Write L's audit row, then move L: `UPDATE locker SET hash_id = new WHERE` primary key `AND
+   hash_id = old` (the second condition makes a concurrent change visible as 0 rows).
+5. Delete the old hash row only if no `locker` row cites it any more (one statement with
+   `NOT EXISTS`), and drop it from the cache.
+
+Every intermediate state is one the next run handles: after step 3 an unused current hash row
+exists and step 3 reuses it; after step 4 the old row is unused and step 5 or the final clean-up
+removes it. No progress is stored by the job.
+
+### Final clean-up of the batch that reaches the end
+
+Delete every `hash_table` row that no `locker` row cites and whose `created_at` is earlier than the
+start of the run minus 60 seconds. The margin leaves alone a hash row that a concurrent add has
+inserted but not yet cited. This removes `v1` rows whose cards were deleted before the job, and
+also the current rows of cards their owners deleted (T29): after the job, such a re-add takes the
+new-card path until the next delete.
+
+### Running while the vault serves requests
+
+The job runs against a live vault. An add of a card not yet processed creates the duplicate of W2;
+the job handles it like any other. Nothing locks the tables.
+
+### Where it runs (W1, recommended A)
+
+A route `POST /custodian/rehash`, added to `src/routes/key_custodian.rs`, reachable only once the
+tenant is unlocked (it resolves the unlocked tenant state, otherwise `CustodianLocked`). Body
+`{ "limit": <rows per batch>, "after": <cursor or null> }`; response `{ "examined", "current",
+"moved", "duplicates", "removed_hash_rows", "next": <cursor or null> }`. The caller loops until
+`next` is null. The custodian router already exists only with the `key_custodian` feature, which the
+e2e tests and the demo use.
+
+### New storage primitives (`src/storage.rs`, `src/storage/db.rs`, cache layer)
+
+- `LockerInterface`: list a batch of rows after a cursor (`id`, primary key, merchant, customer,
+  `hash_id`, encrypted data); update one row's `hash_id` from an expected old value.
+- `HashInterface`: read a hash row by `hash_id`; delete a hash row by `hash_id` if unused,
+  returning its `data_hash` so the cache entry is dropped; delete unused rows older than a time.
+- With the `kv` feature these primitives return an error: the job is refused rather than run on a
+  partial view.
+
+### Audit
+
+New operations `rehash_batch` (one row per call, its outcome) and `rehash_row` (one row per changed
+`locker` row, with merchant, customer and card reference as `resource_id`), through `audit::record`
+and `PendingAudit`, so ids are cleaned and card-shaped ids redacted as elsewhere.
+
+### Files
+
+`src/routes/key_custodian.rs` (route), `src/domain/hash.rs` (job), `src/storage.rs`,
+`src/storage/db.rs`, `src/storage/caching/hash_table.rs` (and the locker cache file if one forwards
+the trait), `src/audit.rs` (operations), `tests/vault_e2e.rs`, `docs/threat-model.md`,
+`docs/tokenization.md`, `README.md`, this design and its plan. Possibly `src/routes/data/types.rs`
+or `transformers.rs` if rebuilding the request data from `StoredData` needs a helper there: outside
+the modifiable list, asked before any change.
+
+## Table changes planned (`docs/threat-model.md`)
+
+- T28: control = the re-hash job; evidence = D1 to D5 tests; status `proven` for tenants on which
+  the job has run; the row says the job must be run, and that duplicates follow W2.
+- T22: per W3.
+- T29: wording notes that the job's clean-up removes the kept hash rows of deleted cards; stays
+  `open` (a delete after the job keeps its hash row again).
+- New row (`open`): the re-hash route can be called by anyone who can reach the custodian routes of
+  an unlocked vault (no finer access rule, like T19); it reveals only counts.
+- T3/T5/T6 evidence may gain the new audit tests; moved `file:line` references corrected.
+
+## Decisions for the owner
+
+- **W1** where the job runs: open. A, a route `POST /custodian/rehash`, usable only after the two
+  custodians have unlocked the tenant (recommended); B, a `utils rehash` command that reads the
+  configuration and asks both custodian keys at the terminal.
+- **W2** duplicate of the same card for the same merchant and customer: open. A, detach the older
+  row (recommended); B, leave it on its old hash and report it; C, delete the older row.
+- **W3** T22: open. A, the job converges rows under any previous key and a test proves it, master
+  key rotation itself stays out of scope (recommended); B, also implement master key rotation.
+
+## Left to the builder
+
+- Exact names, batch size defaults, test names; the helper that writes `v1`-era rows in the tests.
