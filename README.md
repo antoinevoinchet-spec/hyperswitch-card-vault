@@ -39,7 +39,7 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `src/crypto/hash_manager/managers/sha.rs`: new `CardDedupHmac` type (HKDF-SHA512 key derivation and HMAC-SHA512, both from `ring`), with unit tests including an RFC 4231 vector.
   - `src/routes/data.rs`: `/data/add` uses `CardDedupHmac` instead of `Sha512` for the duplicate check.
   - `src/routes/data/transformers.rs`: unit test of `get_hash` with the keyed hash.
-  - `tests/vault_e2e.rs`: two end-to-end tests (one row for a card stored by two merchants; the stored value is not a plain SHA-512).
+  - `tests/vault_e2e.rs`: two end-to-end tests (one row for a card stored by two merchants, replaced since by the merchant-scoped test below; the stored value is not a plain SHA-512).
   - `docs/tokenization.md`: describes the keyed hash, what happens to rows written before it, and updated line references.
   - `docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md` and `docs/superpowers/plans/2026-11-23-keyed-card-hash.md`: design and implementation plan.
 - Threat model table (each protection linked to the test that proves it, each known limit to the text that describes it):
@@ -48,6 +48,14 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `.github/workflows/CI-pr.yml`: added the `threat-model` job, which runs that script on every pull request; existing jobs are unchanged.
   - `docs/tokenization.md`: added a link to the table.
   - `docs/superpowers/specs/2026-11-23-threat-model-table-design.md` and `docs/superpowers/plans/2026-11-23-threat-model-table.md`: design and implementation plan.
+- Duplicate-check hash scoped to the merchant and customer (the same card stored by two merchants, or two customers of one merchant, no longer shares a hash row, so a database reader cannot link them):
+  - `src/crypto/hash_manager/managers/sha.rs`: `CardDedupHmac::from_master_key` takes the merchant and customer ids, adds them to the HKDF context (now `v2`), each preceded by its length; unit tests for two merchants, two customers and unambiguous framing.
+  - `src/routes/data.rs`: `/data/add` passes the merchant and customer ids of the request.
+  - `src/routes/data/transformers.rs`: its unit test passes a scope.
+  - `tests/vault_e2e.rs`: `same_card_for_two_merchants_gets_two_hash_rows` replaces the shared-row test; new tests show that a card known only to another merchant or customer takes the new-card path, and that a hash row written under the former tenant-wide context is not matched.
+  - `docs/threat-model.md`: rows T24 and T25 proven, new open rows T28 (rows written before the change) and T29 (a caller's own deleted card), moved line references.
+  - `docs/tokenization.md`: describes the scope, the remaining paths and the rows written before the change; updated line references.
+  - `docs/superpowers/specs/2026-11-23-merchant-scoped-dedup-design.md` and `docs/superpowers/plans/2026-11-23-merchant-scoped-dedup.md`: design and implementation plan.
 
 ## Demo
 
