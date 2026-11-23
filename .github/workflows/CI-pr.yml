@@ -178,22 +178,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2.9.1
 
-      - name: Diagnose the vault's database URL (temporary)
-        shell: bash
-        run: |
-          set +e
-          psql --version
-          dpkg -l | grep -i libpq
-          psql "postgres://postgres@localhost:5432/postgres?application_name=public&options=-c search_path%3Dpublic" -c 'select 1'
-          echo "with options: exit $?"
-          psql "postgres://postgres@localhost:5432/postgres?application_name=public" -c 'select 1'
-          echo "without options: exit $?"
-          PGPASSWORD=unused psql "postgres://postgres@localhost:5432/postgres" -c 'select 1'
-          echo "with a password: exit $?"
-          psql "postgres://postgres@127.0.0.1:5432/postgres" -c 'select 1'
-          echo "IPv4 address: exit $?"
-          getent hosts localhost
-
       - name: Run end-to-end tests
         shell: bash
         env:
@@ -201,11 +185,6 @@ jobs:
           # Fails the tests instead of skipping them if the URL above goes missing.
           VAULT_TEST_REQUIRE_DB: "1"
         run: cargo test --features key_custodian --test vault_e2e
-
-      - name: Show which libpq the vault links (temporary)
-        if: always()
-        shell: bash
-        run: ldd target/debug/locker | grep -i -E 'pq|ssl' || true
 
       - name: Create the demo database
         shell: bash
