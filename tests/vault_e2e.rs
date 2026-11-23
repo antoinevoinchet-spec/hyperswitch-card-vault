@@ -15,7 +15,8 @@ use std::{
 };
 
 use diesel::{
-    Connection, PgConnection, QueryableByName, RunQueryDsl, connection::SimpleConnection,
+    Connection, OptionalExtension, PgConnection, QueryableByName, RunQueryDsl,
+    connection::SimpleConnection,
 };
 use hyperswitch_card_vault::crypto::{
     encryption_manager::{encryption_interface::Encryption, managers::aes::GcmAes256},
@@ -78,6 +79,24 @@ struct LockerHashRow {
     merchant_id: String,
     #[diesel(sql_type = diesel::sql_types::Text)]
     hash_id: String,
+}
+
+#[derive(QueryableByName, Debug)]
+struct LockerRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    locker_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    merchant_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    customer_id: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    hash_id: String,
+}
+
+#[derive(QueryableByName, Debug)]
+struct TextRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    text: String,
 }
 
 impl TestDb {
@@ -144,6 +163,41 @@ impl TestDb {
             .into_iter()
             .map(|row| (row.merchant_id, row.hash_id))
             .collect()
+    }
+
+    /// Every `locker` row, ordered by card reference.
+    fn locker_rows(&self) -> Vec<LockerRow> {
+        diesel::sql_query(
+            "SELECT locker_id, merchant_id, customer_id, hash_id FROM locker ORDER BY locker_id",
+        )
+        .load(&mut self.connection())
+        .expect("read locker")
+    }
+
+    /// Every column of every `locker` and `hash_table` row, as text, in a stable order.
+    fn snapshot(&self) -> (Vec<String>, Vec<String>) {
+        let rows = |sql: &str| -> Vec<String> {
+            diesel::sql_query(sql)
+                .load::<TextRow>(&mut self.connection())
+                .expect("snapshot")
+                .into_iter()
+                .map(|row| row.text)
+                .collect()
+        };
+        (
+            rows("SELECT t::text AS text FROM locker t ORDER BY locker_id"),
+            rows("SELECT t::text AS text FROM hash_table t ORDER BY hash_id"),
+        )
+    }
+
+    /// `data_hash` of the `hash_table` row with this `hash_id`, if any.
+    fn hash_of(&self, hash_id: &str) -> Option<Vec<u8>> {
+        diesel::sql_query("SELECT data_hash FROM hash_table WHERE hash_id = $1")
+            .bind::<diesel::sql_types::Text, _>(hash_id)
+            .get_result::<HashRow>(&mut self.connection())
+            .optional()
+            .expect("read hash_table")
+            .map(|row| row.data_hash)
     }
 
     fn audit_rows(&self) -> Vec<AuditRow> {
@@ -713,4 +767,603 @@ async fn stored_card_hash_is_not_a_plain_sha512() {
         *stored == expected,
         "stored hash is not the HMAC-SHA512 under the derived key"
     );
+}
+
+// Re-hash job (`utils rehash`), see `docs/superpowers/specs/2026-11-23-rehash-job-design.md`.
+// The vault is stopped around each run, as the design recommends, so its cache never serves a row
+// that the test or the job changed. Values that must never appear in an output are checked
+// without being printed.
+
+const MERCHANT_2: &str = "demo-merchant-2";
+const CUSTOMER_2: &str = "demo-customer-2";
+const ENC_DATA: &str = "opaque-test-value";
+
+fn card_data() -> serde_json::Value {
+    serde_json::json!({ "card": { "card_number": CARD_NUMBER } })
+}
+
+/// Stores `data` (`{"card": ...}` or `{"enc_card_data": ...}`) under a fixed card reference.
+async fn store_card_with_ref(
+    vault: &Vault,
+    merchant: &str,
+    customer: &str,
+    data: serde_json::Value,
+    reference: &str,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "merchant_id": merchant,
+        "merchant_customer_id": customer,
+        "requestor_card_reference": reference,
+    });
+    body.as_object_mut()
+        .expect("body object")
+        .extend(data.as_object().expect("data object").clone());
+    let (status, body) = vault.post("/data/add", body).await;
+    assert_eq!(status, 200, "add card {reference}");
+    serde_json::from_str(&body).expect("add response JSON")
+}
+
+/// Runs `utils rehash` against the test database, the custodian keys on standard input. Returns
+/// the exit code and the joined standard output and error. Stops the command after 120 s.
+fn run_rehash(db: &TestDb, keys: &Keys, key2: &str, args: &[&str]) -> (i32, String) {
+    use std::io::{Read, Write};
+
+    let host = db.url.host_str().expect("database host").to_string();
+    let db_port = db.url.port().unwrap_or(5432).to_string();
+    let password = db.url.password().unwrap_or("unused").to_string();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_utils"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["rehash", "--tenant", "public", "--batch-size", "2"])
+        .args(args)
+        .env("LOCKER__DATABASE__HOST", host)
+        .env("LOCKER__DATABASE__PORT", db_port)
+        .env("LOCKER__DATABASE__USERNAME", db.url.username())
+        .env("LOCKER__DATABASE__PASSWORD", password)
+        .env("LOCKER__DATABASE__DBNAME", &db.name)
+        .env(
+            "LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY",
+            &keys.master_key,
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start utils rehash");
+    // A command that does not read its input closes the pipe; that is not an error here.
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(format!("{}\n{key2}\n", keys.key1).as_bytes());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("wait for utils rehash") {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("rehash timed out");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let mut output = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut output)
+        .expect("read stdout");
+    child
+        .stderr
+        .take()
+        .expect("stderr")
+        .read_to_string(&mut output)
+        .expect("read stderr");
+    (status.code().unwrap_or(-1), output)
+}
+
+/// The `v2` hash `/data/add` stores for `hashed` (a card number or an `enc_card_data` string):
+/// `get_hash` hashes the JSON-serialised string under the scoped key.
+fn expected_hash(master_key: &[u8], merchant: &str, customer: &str, hashed: &str) -> Vec<u8> {
+    CardDedupHmac::from_master_key(&Secret::new(master_key.to_vec()), merchant, customer)
+        .expect("derive dedup key")
+        .encode(serde_json::to_vec(hashed).expect("serialise"))
+        .expect("keyed hash")
+}
+
+/// The tenant-wide `v1` value an older deployment stored for `hashed`.
+fn v1_hash(master_key: &[u8], hashed: &str) -> Vec<u8> {
+    let key: ring::hmac::Key = ring::hkdf::Salt::new(ring::hkdf::HKDF_SHA512, &[])
+        .extract(master_key)
+        .expand(
+            &[b"hyperswitch-card-vault/card-dedup/v1"],
+            ring::hmac::HMAC_SHA512,
+        )
+        .expect("expand v1 key")
+        .into();
+    ring::hmac::sign(&key, &serde_json::to_vec(hashed).expect("serialise"))
+        .as_ref()
+        .to_vec()
+}
+
+fn random_bytes(len: usize) -> Vec<u8> {
+    use ring::rand::SecureRandom;
+    let mut bytes = vec![0_u8; len];
+    ring::rand::SystemRandom::new()
+        .fill(&mut bytes)
+        .expect("random bytes");
+    bytes
+}
+
+fn insert_hash_row(db: &TestDb, hash_id: &str, data_hash: &[u8], created_at: &str) {
+    db.exec(&format!(
+        "INSERT INTO hash_table (hash_id, data_hash, created_at) \
+         VALUES ('{hash_id}', decode('{}', 'hex'), {created_at})",
+        hex::encode(data_hash)
+    ));
+}
+
+/// Turns the stored rows into what a deployment from before I6 left: every `hash_table` row is
+/// replaced, each group's `locker` rows cite one tenant-wide `v1` row, and one unused old row is
+/// added.
+fn seed_v1(db: &TestDb, master_key: &[u8], groups: &[(&str, &str, &[&str])]) {
+    db.exec("DELETE FROM hash_table");
+    for (hash_id, hashed, references) in groups {
+        insert_hash_row(db, hash_id, &v1_hash(master_key, hashed), "'2000-01-01'");
+        for reference in *references {
+            db.exec(&format!(
+                "UPDATE locker SET hash_id = '{hash_id}' WHERE locker_id = '{reference}'"
+            ));
+        }
+    }
+    insert_hash_row(db, "orphan-v1", &random_bytes(64), "'2000-01-01'");
+}
+
+/// Data set "first": the test card for (M1, C1), (M2, C1) and (M1, C2), and an `enc_card_data`
+/// value for (M1, C1), all with `v1` hash rows. Returns the unlocked master key.
+async fn seed_first(db: &TestDb, vault: &Vault, keys: &Keys) -> Vec<u8> {
+    store_card_with_ref(vault, MERCHANT, CUSTOMER, card_data(), "ref-m1-c1").await;
+    store_card_with_ref(vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2-c1").await;
+    store_card_with_ref(vault, MERCHANT, CUSTOMER_2, card_data(), "ref-m1-c2").await;
+    store_card_with_ref(
+        vault,
+        MERCHANT,
+        CUSTOMER,
+        serde_json::json!({ "enc_card_data": ENC_DATA }),
+        "ref-enc",
+    )
+    .await;
+    let master_key = unlocked_master_key(keys);
+    seed_v1(
+        db,
+        &master_key,
+        &[
+            (
+                "legacy-v1",
+                CARD_NUMBER,
+                &["ref-m1-c1", "ref-m2-c1", "ref-m1-c2"],
+            ),
+            ("legacy-enc", ENC_DATA, &["ref-enc"]),
+        ],
+    );
+    master_key
+}
+
+/// Values that must never appear in an output or an audit row: card data, every hash in the
+/// database or expected, and every key.
+fn secrets(db: &TestDb, keys: &Keys, master_key: &[u8]) -> Vec<String> {
+    let mut values = vec![
+        CARD_NUMBER.to_string(),
+        ENC_DATA.to_string(),
+        keys.master_key.clone(),
+        keys.key1.clone(),
+        keys.key2.clone(),
+        hex::encode(master_key),
+    ];
+    values.extend(db.data_hashes().iter().map(hex::encode));
+    for merchant in [MERCHANT, MERCHANT_2] {
+        for customer in [CUSTOMER, CUSTOMER_2] {
+            for hashed in [CARD_NUMBER, ENC_DATA] {
+                values.push(hex::encode(expected_hash(
+                    master_key, merchant, customer, hashed,
+                )));
+            }
+        }
+    }
+    values
+}
+
+/// Fails if `text` contains one of `secrets`, naming only its position.
+fn assert_no_secret(text: &str, secrets: &[String]) {
+    for (index, secret) in secrets.iter().enumerate() {
+        assert!(
+            !text.contains(secret.as_str()),
+            "protected value #{index} found in the output"
+        );
+    }
+}
+
+fn hashed_value_of(locker_id: &str) -> &'static str {
+    if locker_id == "ref-enc" {
+        ENC_DATA
+    } else {
+        CARD_NUMBER
+    }
+}
+
+#[tokio::test]
+async fn rehash_moves_v1_rows_to_scoped_hashes() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let master_key = seed_first(&db, &vault, &keys).await;
+    drop(vault);
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+    assert!(output.contains("examined: 4"), "every row examined once");
+    assert!(output.contains("moved: 4"), "every row moved");
+
+    let rows = db.locker_rows();
+    assert_eq!(rows.len(), 4);
+    for row in &rows {
+        let expected = expected_hash(
+            &master_key,
+            &row.merchant_id,
+            &row.customer_id,
+            hashed_value_of(&row.locker_id),
+        );
+        assert!(
+            db.hash_of(&row.hash_id) == Some(expected),
+            "{} does not cite its v2 hash",
+            row.locker_id
+        );
+    }
+    let hash_ids: std::collections::BTreeSet<_> = rows.iter().map(|row| &row.hash_id).collect();
+    assert_eq!(hash_ids.len(), 4, "two locker rows still share a hash id");
+    for old in ["legacy-v1", "legacy-enc", "orphan-v1"] {
+        assert!(db.hash_of(old).is_none(), "{old} is still in hash_table");
+    }
+    assert_eq!(db.count("hash_table"), 4);
+    assert_no_secret(&output, &secrets(&db, &keys, &master_key));
+
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+    assert_eq!(db.count("locker"), 4, "the duplicate add stored a copy");
+}
+
+#[tokio::test]
+async fn rehash_detaches_the_older_duplicate() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-old").await;
+    let master_key = unlocked_master_key(&keys);
+    seed_v1(
+        &db,
+        &master_key,
+        &[("legacy-v1", CARD_NUMBER, &["ref-old"])],
+    );
+    drop(vault);
+
+    // Before the job: the same merchant and customer add the card again, and it is missed (T28).
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let before = store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-new").await;
+    assert!(before["payload"]["duplication_check"].is_null());
+    drop(vault);
+
+    let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+
+    let rows = db.locker_rows();
+    let row = |reference: &str| {
+        rows.iter()
+            .find(|row| row.locker_id == reference)
+            .unwrap_or_else(|| panic!("{reference} is gone"))
+    };
+    let (old, new) = (row("ref-old"), row("ref-new"));
+    assert!(
+        db.hash_of(&new.hash_id)
+            == Some(expected_hash(&master_key, MERCHANT, CUSTOMER, CARD_NUMBER)),
+        "the newer copy does not cite its v2 hash"
+    );
+    assert_ne!(old.hash_id, new.hash_id);
+    assert!(
+        db.hash_of(&old.hash_id).is_none(),
+        "the older copy is not detached"
+    );
+    assert!(
+        db.hash_of("legacy-v1").is_none(),
+        "legacy-v1 is still in hash_table"
+    );
+
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    for reference in ["ref-old", "ref-new"] {
+        let (status, body) = vault.post("/data/retrieve", card_request(reference)).await;
+        assert_eq!(status, 200, "retrieve {reference}");
+        assert!(
+            body.contains(CARD_NUMBER),
+            "{reference} no longer returns the card"
+        );
+    }
+    let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+    assert_eq!(db.count("locker"), 2);
+}
+
+#[tokio::test]
+async fn rehash_twice_changes_nothing() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-old").await;
+    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2-c1").await;
+    let master_key = unlocked_master_key(&keys);
+    seed_v1(
+        &db,
+        &master_key,
+        &[("legacy-v1", CARD_NUMBER, &["ref-old", "ref-m2-c1"])],
+    );
+    drop(vault);
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-new").await;
+    drop(vault);
+
+    let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "first rehash failed");
+    // Older than the clean-up margin, so the second run's clean-up sees rows it must keep.
+    db.exec("UPDATE hash_table SET created_at = '2000-01-01'");
+    let before = db.snapshot();
+    let audit_before = db.audit_rows().len();
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "second rehash failed");
+    assert!(db.snapshot() == before, "the second run changed a row");
+    let new_rows: Vec<_> = db
+        .audit_rows()
+        .into_iter()
+        .skip(audit_before)
+        .map(|row| (row.operation, row.outcome, row.status_code))
+        .collect();
+    assert_eq!(
+        new_rows,
+        [("rehash_run".to_string(), "success".to_string(), 200)]
+    );
+    for line in ["moved: 0", "duplicates: 0", "removed hash rows: 0"] {
+        assert!(output.contains(line), "second run output lacks `{line}`");
+    }
+}
+
+#[tokio::test]
+async fn rehash_resumed_after_interruption_matches_a_full_run() {
+    let Some(admin) = admin_url() else { return };
+    let keys = Keys::generate();
+    let full = TestDb::create(&admin);
+    let resumed = TestDb::create(&admin);
+    let mut master_key = Vec::new();
+    for db in [&full, &resumed] {
+        let vault = Vault::start(db, &keys.master_key).await;
+        unlock(&vault, &keys).await;
+        master_key = seed_first(db, &vault, &keys).await;
+    }
+
+    let (code, _) = run_rehash(&full, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "full rehash failed");
+
+    // Stopped after one row: legacy-v1 is still cited by two rows, so it must still exist.
+    let (code, output) = run_rehash(&resumed, &keys, &keys.key2, &["--max-rows", "1"]);
+    assert_eq!(code, 2, "an interrupted run must exit 2");
+    assert!(output.contains("complete: no"));
+    assert!(
+        resumed.hash_of("legacy-v1").is_some(),
+        "legacy-v1 deleted while still cited"
+    );
+    // Crash after the insert of a new hash row, before the move.
+    insert_hash_row(
+        &resumed,
+        "crash-insert",
+        &expected_hash(&master_key, MERCHANT_2, CUSTOMER, CARD_NUMBER),
+        "now()",
+    );
+    // Crash after the move, before the old row is deleted.
+    insert_hash_row(
+        &resumed,
+        "crash-move",
+        &expected_hash(&master_key, MERCHANT, CUSTOMER, ENC_DATA),
+        "now()",
+    );
+    resumed.exec("UPDATE locker SET hash_id = 'crash-move' WHERE locker_id = 'ref-enc'");
+
+    let (code, output) = run_rehash(&resumed, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "resumed rehash failed");
+    assert!(output.contains("complete: yes"));
+
+    let full_rows = full.locker_rows();
+    let resumed_rows = resumed.locker_rows();
+    assert_eq!(full_rows.len(), resumed_rows.len());
+    for (a, b) in full_rows.iter().zip(&resumed_rows) {
+        assert_eq!(a.locker_id, b.locker_id);
+        assert!(
+            full.hash_of(&a.hash_id) == resumed.hash_of(&b.hash_id),
+            "{} differs between the full and the resumed run",
+            a.locker_id
+        );
+    }
+    assert_eq!(full.count("hash_table"), resumed.count("hash_table"));
+}
+
+#[tokio::test]
+async fn rehash_audit_rows_hold_no_card_or_key() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let master_key = seed_first(&db, &vault, &keys).await;
+    drop(vault);
+
+    let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+
+    let rows = db.audit_rows();
+    let rehash: Vec<_> = rows
+        .iter()
+        .filter(|row| row.operation.starts_with("rehash_"))
+        .map(|row| {
+            (
+                row.operation.as_str(),
+                row.outcome.as_str(),
+                row.status_code,
+            )
+        })
+        .collect();
+    assert_eq!(
+        rehash,
+        [
+            ("rehash_row", "success", 200),
+            ("rehash_row", "success", 200),
+            ("rehash_row", "success", 200),
+            ("rehash_row", "success", 200),
+            ("rehash_run", "success", 200),
+        ]
+    );
+    let secrets = secrets(&db, &keys, &master_key);
+    for row in &rows {
+        assert_no_secret(&row.text, &secrets);
+    }
+}
+
+#[tokio::test]
+async fn rehash_stops_when_audit_table_is_unwritable() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let master_key = seed_first(&db, &vault, &keys).await;
+    drop(vault);
+    let before = db.snapshot();
+
+    db.exec("ALTER TABLE audit_log RENAME TO audit_log_blocked");
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    db.exec("ALTER TABLE audit_log_blocked RENAME TO audit_log");
+
+    assert_eq!(code, 1, "rehash must fail without its audit rows");
+    assert!(
+        output.contains("rehash failed"),
+        "not the re-hash command's own error"
+    );
+    assert!(
+        db.snapshot() == before,
+        "a row changed without its audit entry"
+    );
+    assert_no_secret(&output, &secrets(&db, &keys, &master_key));
+}
+
+#[tokio::test]
+async fn rehash_converges_rows_hashed_under_another_master_key() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1-c1").await;
+    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2-c1").await;
+    drop(vault);
+    // What a change of master key would leave: hashes under the same derivation, another key.
+    let other_key = random_bytes(32);
+    for row in db.locker_rows() {
+        db.exec(&format!(
+            "UPDATE hash_table SET data_hash = decode('{}', 'hex') WHERE hash_id = '{}'",
+            hex::encode(expected_hash(
+                &other_key,
+                &row.merchant_id,
+                &row.customer_id,
+                CARD_NUMBER
+            )),
+            row.hash_id
+        ));
+    }
+
+    let (code, _) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+    let master_key = unlocked_master_key(&keys);
+    for row in db.locker_rows() {
+        assert!(
+            db.hash_of(&row.hash_id)
+                == Some(expected_hash(
+                    &master_key,
+                    &row.merchant_id,
+                    &row.customer_id,
+                    CARD_NUMBER
+                )),
+            "{} still cites a hash under the other key",
+            row.locker_id
+        );
+    }
+    assert_eq!(db.count("hash_table"), 2);
+
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
+    assert_eq!(again["payload"]["duplication_check"], "duplicated");
+}
+
+#[tokio::test]
+async fn rehash_on_an_empty_tenant_changes_nothing() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    insert_hash_row(&db, "orphan-v1", &random_bytes(64), "'2000-01-01'");
+    insert_hash_row(&db, "fresh", &random_bytes(64), "now()");
+
+    let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
+    assert_eq!(code, 0, "rehash failed");
+    assert!(output.contains("examined: 0"));
+    assert!(
+        db.hash_of("orphan-v1").is_none(),
+        "an old unused row was kept"
+    );
+    assert!(
+        db.hash_of("fresh").is_some(),
+        "a row younger than the margin was deleted"
+    );
+}
+
+#[tokio::test]
+async fn rehash_refuses_wrong_custodian_keys() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let master_key = seed_first(&db, &vault, &keys).await;
+    drop(vault);
+    let before = db.snapshot();
+    // A wrong key of the right shape (16 bytes as hex).
+    let wrong_key2 = uuid::Uuid::now_v7().simple().to_string();
+
+    let (code, output) = run_rehash(&db, &keys, &wrong_key2, &[]);
+    assert_eq!(code, 1, "rehash must refuse a wrong custodian key");
+    assert!(
+        output.contains("rehash failed"),
+        "not the re-hash command's own error"
+    );
+    assert!(db.snapshot() == before, "a row changed with a wrong key");
+    let mut secrets = secrets(&db, &keys, &master_key);
+    secrets.push(wrong_key2);
+    assert_no_secret(&output, &secrets);
 }
