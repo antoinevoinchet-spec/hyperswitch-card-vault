@@ -1,7 +1,7 @@
 # Re-hash job for the duplicate-check hash (R1): design
 
-Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; W1 and W2 taken by the owner,
-W3 open.
+Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: decisions W1, W2 and W3
+taken by the owner; plan in `docs/superpowers/plans/2026-11-23-rehash-job.md`.
 
 ## Intent
 
@@ -99,7 +99,7 @@ None of them settles where such a job should run.
 - **D9** The counts balance: rows examined = already current + moved + handled as duplicate; if
   they do not, the batch fails before its final clean-up.
   Verifiable by: unit test on the balance check (the error case required by `CLAUDE.md`).
-- **D10** (T22, per W3) The same job also converges rows whose hash was written under another master
+- **D10** (T22, W3 = A) The same job also converges rows whose hash was written under another master
   key: it only needs the current key, since it compares each cited hash with the recomputed one.
   Verifiable by: e2e test with hash rows computed in the test under the `v2` derivation of another
   random master key.
@@ -215,7 +215,9 @@ the modifiable list, asked before any change.
 
 - T28: control = the re-hash job; evidence = D1 to D5 tests; status `proven` for tenants on which
   the job has run; the row says the job must be run, and that duplicates follow W2.
-- T22: per W3.
+- T22: stays `open`; control still `none` for the rotation itself; evidence adds the D10 test and
+  the `docs/tokenization.md` lines saying that the re-hash after a key change exists and that the
+  rotation does not.
 - T29: wording notes that the job's clean-up removes the kept hash rows of deleted cards; stays
   `open` (a delete after the job keeps its hash row again).
 - New row (`open`): run next to a live vault, the job can leave a duplicate created during the run
@@ -237,8 +239,12 @@ the modifiable list, asked before any change.
   stored copies remain, as before the job. Rejected: B, leave it on its old hash and report it
   (keeps the link of T24 and the old row until a manual fix); C, delete it (the merchant may still
   use that reference).
-- **W3** T22: open. A, the job converges rows under any previous key and a test proves it, master
-  key rotation itself stays out of scope (recommended); B, also implement master key rotation.
+- **W3** T22: **A, the job converges rows whose hash was written under any other master key, and a
+  test proves it; master key rotation itself (re-encrypting each merchant key under a new master
+  key) stays out of scope** (owner, 2026-11-23). T22 stays `open`, since a master key still cannot
+  be changed in this code; its row cites the job and its test as the part that exists. Rejected: B,
+  also implement the rotation (about a second ticket, in key management, which would mix two risky
+  reviews, as decision S2 of I6 already refused).
 
 ## Left to the builder
 
