@@ -1,0 +1,60 @@
+name: Scorecard
+
+# OpenSSF Scorecard, run as a report: its results are not published to the Scorecard API, so no
+# badge can show them, and they are not uploaded to the Security tab. They are kept as an artifact
+# of the run for 5 days and printed in the job summary.
+
+on:
+  # Experimental for this action; runs here so that a pull request shows the report.
+  pull_request:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "29 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.json
+          results_format: json
+          publish_results: false
+
+      - name: Keep the results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scorecard-results
+          path: results.json
+          retention-days: 5
+
+      - name: Print the score of each check
+        shell: bash
+        env:
+          RESULTS: results.json
+        run: |
+          count=$(jq '.checks | length' "$RESULTS")
+          if [ -z "$count" ] || [ "$count" -eq 0 ]; then
+            echo "::error::no Scorecard check in $RESULTS"
+            exit 1
+          fi
+          {
+            echo "| Check | Score |"
+            echo "|---|---|"
+            jq -r '.checks[] | "| \(.name) | \(.score) |"' "$RESULTS"
+          } >> "$GITHUB_STEP_SUMMARY"
