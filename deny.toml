@@ -1,0 +1,47 @@
+# cargo-deny configuration: known vulnerabilities (RustSec database), licenses and crate sources.
+# Run in CI by .github/workflows/dependencies.yml. Design:
+# docs/superpowers/specs/2026-11-23-hygiene-ci-design.md.
+
+[graph]
+# Every optional feature, so that crates used only by the KMS, Redis or middleware features are
+# checked too.
+all-features = true
+
+[advisories]
+# Policy decided by the fork's owner on 2026-11-23: an entry that already affects the original
+# code at commit a8ee711 is listed below, with its reason and an expiry date of 2027-02-21. After
+# that date it fails again. Any other entry fails the check.
+# Limit: the RustSec database describes crates.io releases. The crates taken from git (see the
+# sources section) are checked for their source and license, not for known vulnerabilities.
+unmaintained = "workspace"
+unsound = "workspace"
+yanked = "warn"
+ignore = []
+
+[licenses]
+# Every license found in the dependency graph on 2026-11-23; any other license fails.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "Unicode-3.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+
+[sources]
+# crates.io and the two upstream git repositories only, each pinned by a tag or a revision.
+unknown-registry = "deny"
+unknown-git = "deny"
+required-git-spec = "tag"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+    "https://github.com/juspay/hyperswitch",
+    "https://github.com/juspay/framework-libs-rs",
+]
