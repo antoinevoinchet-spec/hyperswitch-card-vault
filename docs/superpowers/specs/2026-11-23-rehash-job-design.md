@@ -1,7 +1,7 @@
 # Re-hash job for the duplicate-check hash (R1): design
 
-Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; W1 taken by the owner,
-W2 and W3 open.
+Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; W1 and W2 taken by the owner,
+W3 open.
 
 ## Intent
 
@@ -230,8 +230,13 @@ the modifiable list, asked before any change.
   point outside the JWE middleware that decrypts every card of the tenant, for a job run once; its
   cache advantage holds only for a single vault instance. Accepted cost of B: the master key also
   lives, for the run, in the command's process, and the custodians type their keys into it.
-- **W2** duplicate of the same card for the same merchant and customer: open. A, detach the older
-  row (recommended); B, leave it on its old hash and report it; C, delete the older row.
+- **W2** duplicate of the same card for the same merchant and customer: **A, detach the row that
+  cannot take the current hash** (owner, 2026-11-23). It gets a fresh random `hash_id` with no
+  `hash_table` row: both card references still retrieve the card, no link to anyone remains, the
+  old hash row can be deleted, and later adds find the other copy and return `duplicated`. The two
+  stored copies remain, as before the job. Rejected: B, leave it on its old hash and report it
+  (keeps the link of T24 and the old row until a manual fix); C, delete it (the merchant may still
+  use that reference).
 - **W3** T22: open. A, the job converges rows under any previous key and a test proves it, master
   key rotation itself stays out of scope (recommended); B, also implement master key rotation.
 
