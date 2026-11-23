@@ -1176,14 +1176,14 @@ async fn rehash_resumed_after_interruption_matches_a_full_run() {
         &resumed,
         "crash-insert",
         &expected_hash(&master_key, MERCHANT_2, CUSTOMER, CARD_NUMBER),
-        "now()",
+        "(now() AT TIME ZONE 'utc')",
     );
     // Crash after the move, before the old row is deleted.
     insert_hash_row(
         &resumed,
         "crash-move",
         &expected_hash(&master_key, MERCHANT, CUSTOMER, ENC_DATA),
-        "now()",
+        "(now() AT TIME ZONE 'utc')",
     );
     resumed.exec("UPDATE locker SET hash_id = 'crash-move' WHERE locker_id = 'ref-enc'");
 
@@ -1328,7 +1328,12 @@ async fn rehash_on_an_empty_tenant_changes_nothing() {
     let db = TestDb::create(&admin);
     let keys = Keys::generate();
     insert_hash_row(&db, "orphan-v1", &random_bytes(64), "'2000-01-01'");
-    insert_hash_row(&db, "fresh", &random_bytes(64), "now()");
+    insert_hash_row(
+        &db,
+        "fresh",
+        &random_bytes(64),
+        "(now() AT TIME ZONE 'utc')",
+    );
 
     let (code, output) = run_rehash(&db, &keys, &keys.key2, &[]);
     assert_eq!(code, 0, "rehash failed");
