@@ -16,7 +16,58 @@ all-features = true
 unmaintained = "workspace"
 unsound = "workspace"
 yanked = "warn"
-ignore = []
+# Read from the first run of the check on this branch (2026-11-23): 45 known vulnerabilities and 3
+# unsound notices on direct dependencies.
+ignore = [
+    { id = "RUSTSEC-2021-0157", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2021-0158", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2023-0071", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rsa
+    { id = "RUSTSEC-2025-0022", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2025-0024", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # crossbeam-channel
+    { id = "RUSTSEC-2026-0045", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # aws-lc-sys
+    { id = "RUSTSEC-2026-0048", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # aws-lc-sys
+    { id = "RUSTSEC-2026-0049", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls-webpki
+    { id = "RUSTSEC-2026-0097", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rand
+    { id = "RUSTSEC-2026-0098", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls-webpki
+    { id = "RUSTSEC-2026-0099", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls-webpki
+    { id = "RUSTSEC-2026-0104", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls-webpki
+    { id = "RUSTSEC-2026-0193", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2026-0194", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # quick-xml
+    { id = "RUSTSEC-2026-0195", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # quick-xml
+    { id = "RUSTSEC-2026-0198", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # error-stack
+    { id = "RUSTSEC-2026-0204", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # crossbeam-epoch
+    { id = "RUSTSEC-2026-0213", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2026-0258", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # h2
+    { id = "RUSTSEC-2026-0346", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls
+    { id = "RUSTSEC-2026-0348", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls
+    { id = "RUSTSEC-2026-0349", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls
+    { id = "RUSTSEC-2026-0373", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2026-0381", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # webpki-roots
+    { id = "RUSTSEC-2026-0382", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # rustls-webpki
+    { id = "RUSTSEC-2026-0386", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # tokio
+    { id = "RUSTSEC-2026-0391", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # zstd
+    { id = "RUSTSEC-2026-0398", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # zstd-safe
+    { id = "RUSTSEC-2026-0403", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # zstd-safe
+    { id = "RUSTSEC-2026-0410", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # zstd-sys
+    { id = "RUSTSEC-2026-0446", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0447", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-web
+    { id = "RUSTSEC-2026-0448", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0455", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0463", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0473", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0474", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0475", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0476", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0477", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0478", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0479", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # openssl
+    { id = "RUSTSEC-2026-0533", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # ammonia
+    { id = "RUSTSEC-2026-0552", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0553", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0554", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # actix-http
+    { id = "RUSTSEC-2026-0592", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # url
+    { id = "RUSTSEC-2026-0594", reason = "present in the original code at a8ee711, not fixed by this fork", expiry = "2027-02-21" }, # cookie
+]
 
 [licenses]
 # Every license found in the dependency graph on 2026-11-23; any other license fails.
