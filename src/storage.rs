@@ -557,6 +557,25 @@ pub(crate) trait LockerInterface {
         merchant_id: &str,
         customer_id: &str,
     ) -> Result<usize, ContainerError<Self::Error>>;
+
+    /// Up to `limit` rows whose serial `id` is greater than `after_id`, in `id` order, each with its
+    /// `id` (the re-hash job's cursor). PostgreSQL only: an error under the `kv` feature.
+    async fn find_locker_batch(
+        &self,
+        after_id: i32,
+        limit: i64,
+    ) -> Result<Vec<(i32, types::Locker)>, ContainerError<Self::Error>>;
+
+    /// Point the row at `new_hash_id`, only if it still cites `old_hash_id`; returns the number of
+    /// rows changed (0 when the row changed meanwhile). PostgreSQL only.
+    async fn update_locker_hash_id(
+        &self,
+        locker_id: Secret<String>,
+        merchant_id: &str,
+        customer_id: &str,
+        old_hash_id: &str,
+        new_hash_id: &str,
+    ) -> Result<usize, ContainerError<Self::Error>>;
 }
 
 /// Trait defining behaviour of the application with the hash table, providing APIs to interact
@@ -577,6 +596,26 @@ pub(crate) trait HashInterface {
         &self,
         data_hash: Secret<Vec<u8>>,
     ) -> Result<types::HashTable, ContainerError<Self::Error>>;
+
+    /// Read by `hash_id`; `None` if absent. PostgreSQL only: an error under the `kv` feature.
+    async fn find_optional_by_hash_id(
+        &self,
+        hash_id: &str,
+    ) -> Result<Option<types::HashTable>, ContainerError<Self::Error>>;
+
+    /// Delete the row with this `hash_id` if no `locker` row cites it; returns its `data_hash` when
+    /// it was deleted. PostgreSQL only.
+    async fn delete_hash_if_unused(
+        &self,
+        hash_id: &str,
+    ) -> Result<Option<Secret<Vec<u8>>>, ContainerError<Self::Error>>;
+
+    /// Delete every row created before `before` that no `locker` row cites; returns their
+    /// `data_hash`. PostgreSQL only.
+    async fn delete_unused_hashes_before(
+        &self,
+        before: time::PrimitiveDateTime,
+    ) -> Result<Vec<Secret<Vec<u8>>>, ContainerError<Self::Error>>;
 }
 
 pub(crate) trait TestInterface {

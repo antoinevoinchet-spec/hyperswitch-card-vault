@@ -305,6 +305,97 @@ impl super::LockerInterface for Storage {
             Ok(output)
         }
     }
+
+    async fn find_locker_batch(
+        &self,
+        after_id: i32,
+        limit: i64,
+    ) -> Result<Vec<(i32, types::Locker)>, ContainerError<Self::Error>> {
+        #[cfg(feature = "kv")]
+        {
+            let _ = (after_id, limit);
+            Err(error::VaultDBError::DBFilterError.into())
+        }
+
+        #[cfg(not(feature = "kv"))]
+        {
+            let conn = self.get_conn().await?;
+            let query = types::LockerInner::table()
+                .select((schema::locker::id, schema::locker::all_columns))
+                .filter(schema::locker::id.gt(after_id))
+                .order(schema::locker::id.asc())
+                .limit(limit);
+
+            let pool = conn.pool();
+            let operation = DbOperation::FindOne;
+            super::log_db_query::<<types::LockerInner as HasTable>::Table, _>(
+                &query, operation, pool,
+            );
+
+            let rows: Vec<(i32, types::LockerInner)> =
+                super::record_db_query::<<types::LockerInner as HasTable>::Table, _, _, _>(
+                    query.load_async(conn.get()),
+                    operation,
+                    pool,
+                )
+                .await?;
+
+            Ok(rows
+                .into_iter()
+                .map(|(id, inner)| (id, inner.into()))
+                .collect())
+        }
+    }
+
+    async fn update_locker_hash_id(
+        &self,
+        locker_id: Secret<String>,
+        merchant_id: &str,
+        customer_id: &str,
+        old_hash_id: &str,
+        new_hash_id: &str,
+    ) -> Result<usize, ContainerError<Self::Error>> {
+        #[cfg(feature = "kv")]
+        {
+            let _ = (
+                locker_id,
+                merchant_id,
+                customer_id,
+                old_hash_id,
+                new_hash_id,
+            );
+            Err(error::VaultDBError::DBError.into())
+        }
+
+        #[cfg(not(feature = "kv"))]
+        {
+            let conn = self.get_conn().await?;
+            let query = diesel::update(types::LockerInner::table())
+                .filter(
+                    schema::locker::locker_id
+                        .eq(locker_id.expose())
+                        .and(schema::locker::merchant_id.eq(merchant_id.to_owned()))
+                        .and(schema::locker::customer_id.eq(customer_id.to_owned()))
+                        .and(schema::locker::hash_id.eq(old_hash_id.to_owned())),
+                )
+                .set(schema::locker::hash_id.eq(new_hash_id.to_owned()));
+
+            let pool = conn.pool();
+            let operation = DbOperation::Update;
+            super::log_db_query::<<types::LockerInner as HasTable>::Table, _>(
+                &query, operation, pool,
+            );
+
+            let output =
+                super::record_db_query_rows::<<types::LockerInner as HasTable>::Table, _, _>(
+                    query.execute_async(conn.get()),
+                    operation,
+                    pool,
+                )
+                .await?;
+            Ok(output)
+        }
+    }
 }
 
 impl super::HashInterface for Storage {
@@ -395,6 +486,136 @@ impl super::HashInterface for Storage {
             Ok(output)
         }
     }
+
+    async fn find_optional_by_hash_id(
+        &self,
+        hash_id: &str,
+    ) -> Result<Option<types::HashTable>, ContainerError<Self::Error>> {
+        #[cfg(feature = "kv")]
+        {
+            let _ = hash_id;
+            Err(error::HashDBError::DBFilterError.into())
+        }
+
+        #[cfg(not(feature = "kv"))]
+        {
+            let conn = self.get_conn().await?;
+            let query = types::HashTable::table()
+                .filter(schema::hash_table::hash_id.eq(hash_id.to_owned()));
+
+            let pool = conn.pool();
+            let operation = DbOperation::FindOne;
+            super::log_db_query::<<types::HashTable as HasTable>::Table, _>(
+                &query, operation, pool,
+            );
+
+            let output =
+                super::record_db_query_optional::<<types::HashTable as HasTable>::Table, _, _, _>(
+                    async {
+                        query
+                            .get_result_async::<types::HashTable>(conn.get())
+                            .await
+                            .optional()
+                    },
+                    operation,
+                    pool,
+                )
+                .await?;
+
+            Ok(output)
+        }
+    }
+
+    async fn delete_hash_if_unused(
+        &self,
+        hash_id: &str,
+    ) -> Result<Option<Secret<Vec<u8>>>, ContainerError<Self::Error>> {
+        #[cfg(feature = "kv")]
+        {
+            let _ = hash_id;
+            Err(error::HashDBError::DBError.into())
+        }
+
+        #[cfg(not(feature = "kv"))]
+        {
+            let conn = self.get_conn().await?;
+            // Bound parameter; the NOT EXISTS keeps every row that a locker row still cites.
+            let query = diesel::sql_query(
+                "DELETE FROM hash_table h WHERE h.hash_id = $1 \
+                 AND NOT EXISTS (SELECT 1 FROM locker l WHERE l.hash_id = h.hash_id) \
+                 RETURNING h.data_hash",
+            )
+            .bind::<diesel::sql_types::Text, _>(hash_id.to_owned());
+
+            let pool = conn.pool();
+            let operation = DbOperation::Delete;
+            super::log_db_query::<<types::HashTable as HasTable>::Table, _>(
+                &query, operation, pool,
+            );
+
+            let rows: Vec<DeletedHash> =
+                super::record_db_query::<<types::HashTable as HasTable>::Table, _, _, _>(
+                    query.load_async(conn.get()),
+                    operation,
+                    pool,
+                )
+                .await?;
+
+            Ok(rows
+                .into_iter()
+                .next()
+                .map(|row| Secret::new(row.data_hash)))
+        }
+    }
+
+    async fn delete_unused_hashes_before(
+        &self,
+        before: time::PrimitiveDateTime,
+    ) -> Result<Vec<Secret<Vec<u8>>>, ContainerError<Self::Error>> {
+        #[cfg(feature = "kv")]
+        {
+            let _ = before;
+            Err(error::HashDBError::DBError.into())
+        }
+
+        #[cfg(not(feature = "kv"))]
+        {
+            let conn = self.get_conn().await?;
+            let query = diesel::sql_query(
+                "DELETE FROM hash_table h WHERE h.created_at < $1 \
+                 AND NOT EXISTS (SELECT 1 FROM locker l WHERE l.hash_id = h.hash_id) \
+                 RETURNING h.data_hash",
+            )
+            .bind::<diesel::sql_types::Timestamp, _>(before);
+
+            let pool = conn.pool();
+            let operation = DbOperation::Delete;
+            super::log_db_query::<<types::HashTable as HasTable>::Table, _>(
+                &query, operation, pool,
+            );
+
+            let rows: Vec<DeletedHash> =
+                super::record_db_query::<<types::HashTable as HasTable>::Table, _, _, _>(
+                    query.load_async(conn.get()),
+                    operation,
+                    pool,
+                )
+                .await?;
+
+            Ok(rows
+                .into_iter()
+                .map(|row| Secret::new(row.data_hash))
+                .collect())
+        }
+    }
+}
+
+/// `data_hash` returned by the re-hash job's deletes.
+#[cfg(not(feature = "kv"))]
+#[derive(diesel::QueryableByName)]
+struct DeletedHash {
+    #[diesel(sql_type = diesel::sql_types::Binary)]
+    data_hash: Vec<u8>,
 }
 
 impl super::TestInterface for Storage {

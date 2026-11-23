@@ -56,6 +56,17 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/threat-model.md`: rows T24 and T25 proven, new evidence for T11, new open rows T28 (rows written before the change) and T29 (a caller's own deleted card), moved line references.
   - `docs/tokenization.md`: describes the scope, the remaining paths and the rows written before the change; updated line references.
   - `docs/superpowers/specs/2026-11-23-merchant-scoped-dedup-design.md` and `docs/superpowers/plans/2026-11-23-merchant-scoped-dedup.md`: design and implementation plan.
+- Re-hash job for the duplicate-check hash (`utils rehash` recomputes every stored card's hash under the current master key and the merchant and customer scope, so the older rows of the previous entry are converted once it has run; it can be run again without harm, resumes after an interruption, and is recorded in the audit log):
+  - `src/domain/hash.rs`: the job (one row at a time, state recomputed from the rows, an older duplicate of the same merchant and customer detached, unused hash rows deleted), its counts and their balance check, with unit tests.
+  - `src/bin/utils.rs`: new `rehash` subcommand; custodian keys read from standard input; prints counts only.
+  - `src/storage.rs`, `src/storage/db.rs`, `src/storage/caching/hash_table.rs`: storage primitives for the job (rows by cursor, update of a row's hash id, hash row by id, deletes of unused hash rows), forwarded by the cache, refused with the `kv` feature.
+  - `src/audit.rs`: `rehash_row`, `rehash_cleanup` and `rehash_run` operations, with a unit test.
+  - `src/routes/data.rs`: the hash helpers are visible inside the crate, so the job computes the hash exactly as `/data/add` does.
+  - `src/routes/key_custodian.rs`: the function that unlocks the master key with the custodian keys is public, so the command unlocks it as the vault does.
+  - `tests/vault_e2e.rs`: twelve end-to-end tests of the job (rows written before the scope, the older duplicate, the newer copy kept after a key change, a second run, an interrupted run, audit rows, an unwritable audit table during the rows and during the clean-up, rows under another master key, an empty tenant, wrong custodian keys, a batch size of 0).
+  - `docs/threat-model.md`: T28 proven once the job has run, new evidence for T22 (still open: rotation is not implemented), T21 and T29 wording, new open row T30 (a run next to a live vault), moved line references.
+  - `docs/tokenization.md`: describes the job, how to run it, what it leaves, and updated line references.
+  - `docs/superpowers/specs/2026-11-23-rehash-job-design.md` and `docs/superpowers/plans/2026-11-23-rehash-job.md`: design and implementation plan.
 
 ## Demo
 
