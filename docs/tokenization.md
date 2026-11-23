@@ -190,9 +190,9 @@ describes it, in the [threat model table](./threat-model.md).
   `rehash_moves_v1_rows_to_scoped_hashes`: each row cites its expected hash, a new add returns
   `duplicated`). With the `kv` feature, the job refuses to run and changes no row (test
   `rehash_refuses_to_run_with_kv`, CI job "Re-hash refusal with the kv feature"). With no card
-  stored, only two of the six storage calls that refuse under `kv` are on its path (the read of the
+  stored, only two of the five storage calls that refuse under `kv` are on its path (the read of the
   rows and the final clean-up): the test fails when both refusals are removed, not when only one
-  is. The four refusals on the path of a stored card are compiled, not tested.
+  is. The three refusals on the path of a stored card are compiled, not tested.
 - **The master key must stay a real secret even with an external key manager.** With the
   `external_key_manager` feature enabled, the cards are encrypted by the external service
   (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it

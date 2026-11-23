@@ -158,7 +158,7 @@ diesel against a throwaway PostgreSQL.
   Expected: `1 passed`.
 
 - [ ] **Step 3: Deliberate breakage (stop for the owner's yes), then revert.** In `src/storage/db.rs`
-  lines 309-614, for the six re-hash primitives and `DeletedHash`, replace each refusal's
+  lines 309-614, for the five re-hash refusals, `DeletedHash` and the two imports of lines 2 and 5, replace each refusal's
   `#[cfg(feature = "kv")]` by `#[cfg(any())]` and the following `#[cfg(not(feature = "kv"))]` by
   `#[cfg(all())]`, so the PostgreSQL code runs under `kv`. Run step 2 again. Expected: FAIL on
   `rehash must refuse to run under kv` (exit code 0, the orphan row deleted). Revert with
@@ -267,7 +267,7 @@ diesel against a throwaway PostgreSQL.
   - T28: add `rehash_refuses_to_run_with_kv`, and the note that `rehash_moves_v1_rows_to_scoped_hashes`
     and the other re-hash tests also run without `key_custodian` (CI job "Re-hash without the
     key_custodian feature"); write that under `kv` only
-    two of the job's six refusals are on the tested path (no card stored), the other four being
+    two of the job's five refusals are on the tested path (no card stored), the other three being
     compiled only. Stays `proven` for what it claims.
   - T31 (`not tested`): a dependency with a known vulnerability, an unapproved license or an unapproved
     source enters the build; control: the `deny.toml` lines of each rule and the job line of
@@ -283,7 +283,7 @@ diesel against a throwaway PostgreSQL.
   - Update "How to check it yourself" (the run without custodians, the `kv` test). Fix every moved
     `file:line`.
 - [ ] **Step 2: `docs/tokenization.md`**: remove the `kv` refusal and the run without `key_custodian`
-  from the "Not tested" list, cite their tests; write the `kv` limit (two of six refusals on the path).
+  from the "Not tested" list, cite their tests; write the `kv` limit (two of five refusals on the path).
 - [ ] **Step 3: `README.md`**: a "CI hygiene" entry under "Changes from the original" listing every file
   of `git diff --name-only main` except `README.md`, one line each.
 - [ ] **Step 4: Checks**:

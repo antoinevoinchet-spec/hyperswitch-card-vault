@@ -61,7 +61,7 @@ proven by a test, a CI job or a command that fails when the control it describes
   current `main`, because of the original code.
 - `utils rehash` under `kv`: the binary passes no Redis (`src/bin/utils.rs:261-262`); the job's first
   storage call, `find_locker_batch`, returns an error under `kv` before any query
-  (`src/storage/db.rs:314-318`), as do the five other primitives of the job. A PostgreSQL alone is
+  (`src/storage/db.rs:314-318`), as do four other primitives of the job. A PostgreSQL alone is
   enough to run it. The vault itself built with `kv` expects a Redis at start-up
   (`src/tenant.rs:58-71`), so the `kv` test cannot seed cards through the vault.
 - Without `key_custodian`, the vault and `utils` take the master key from the configuration, hex
@@ -157,7 +157,7 @@ proven by a test, a CI job or a command that fails when the control it describes
   service only, `cargo test --features key_custodian,kv --test vault_e2e rehash_refuses_to_run_with_kv`.
 - Breakage: remove the `kv` refusals of the job's storage primitives (keep the PostgreSQL code under
   `kv`); the test must fail on the snapshot or the exit code. Limit, written in the docs: with no
-  card stored, only two of the six refusals are on the path; the other four stay compiled only.
+  card stored, only two of the five refusals are on the path; the other three stay compiled only.
 
 ### Run without `key_custodian` (D4)
 
