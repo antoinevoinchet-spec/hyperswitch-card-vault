@@ -1574,6 +1574,8 @@ async fn rehash_keeps_the_newer_copy_after_a_key_change() {
 // each run. Key bytes are compared with `assert!` so that a failure never prints a key.
 
 const MERCHANT_3: &str = "demo-merchant-3";
+/// A second public test card number, so that two merchants' cards cannot be mistaken for each other.
+const CARD_2: &str = "5555555555554444";
 const MERCHANT_NO_CARD: &str = "merchant-no-card";
 
 #[derive(QueryableByName, Debug)]
@@ -1596,6 +1598,19 @@ struct LockerDataRow {
     enc_data: Vec<u8>,
     #[diesel(sql_type = diesel::sql_types::Text)]
     hash_id: String,
+}
+
+fn card_data_with(number: &str) -> serde_json::Value {
+    serde_json::json!({ "card": { "card_number": number } })
+}
+
+/// Fails unless `body`, a `/data/retrieve` response, returns exactly `expected` as the card number.
+fn assert_card_number(body: &str, expected: &str, reference: &str) {
+    let response: serde_json::Value = serde_json::from_str(body).expect("retrieve JSON");
+    assert!(
+        response["payload"]["card"]["card_number"].as_str() == Some(expected),
+        "{reference} does not return its own card number"
+    );
 }
 
 /// `(merchant_id, enc_key)` of every `merchant` row, ordered by merchant id.
@@ -1752,6 +1767,7 @@ fn rotation_secrets(db: &TestDb, former: &Keys, new: &Keys) -> Vec<String> {
     let new_raw = unlocked_master_key(new);
     let mut values = secrets(db, former, &former_raw);
     values.extend(secrets(db, new, &new_raw));
+    values.push(CARD_2.to_string());
     for (_, blob) in merchant_rows(db) {
         values.push(hex::encode(&blob));
         for key in [&former_raw, &new_raw] {
@@ -1771,11 +1787,18 @@ fn rotation_audit(db: &TestDb) -> Vec<(String, String, i16)> {
         .collect()
 }
 
-/// Cards for `MERCHANT` (`ref-m1`) and `MERCHANT_2` (`ref-m2`), and `MERCHANT_NO_CARD` created by
-/// `POST /entity` with no card.
+/// The test card for `MERCHANT` (`ref-m1`), `CARD_2` for `MERCHANT_2` (`ref-m2`), and
+/// `MERCHANT_NO_CARD` created by `POST /entity` with no card.
 async fn seed_rotation(vault: &Vault) {
     store_card_with_ref(vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
-    store_card_with_ref(vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+    store_card_with_ref(
+        vault,
+        MERCHANT_2,
+        CUSTOMER,
+        card_data_with(CARD_2),
+        "ref-m2",
+    )
+    .await;
     let (status, _) = vault
         .post(
             "/entity",
@@ -1814,12 +1837,15 @@ async fn rotation_cards_read_back_for_two_merchants() {
 
     let vault = Vault::start(&db, &new.master_key).await;
     unlock(&vault, &new).await;
-    for (merchant, reference) in [(MERCHANT, "ref-m1"), (MERCHANT_2, "ref-m2")] {
+    for (merchant, reference, number) in [
+        (MERCHANT, "ref-m1", CARD_NUMBER),
+        (MERCHANT_2, "ref-m2", CARD_2),
+    ] {
         let (status, body) = vault
             .post("/data/retrieve", retrieve_request(merchant, reference))
             .await;
         assert_eq!(status, 200, "retrieve {reference}");
-        assert!(body.contains(CARD_NUMBER), "{reference} lost its card");
+        assert_card_number(&body, number, reference);
     }
     let new_raw = unlocked_master_key(&new);
     for (merchant_id, blob) in merchant_rows(&db) {
@@ -1942,8 +1968,9 @@ async fn rotation_resumed_after_interruption_matches_a_full_run() {
     let (former_raw, new_raw) = (unlocked_master_key(&former), unlocked_master_key(&new));
     let full = TestDb::create(&admin);
     let resumed = TestDb::create(&admin);
+    let crashed = TestDb::create(&admin);
     let mut before = Vec::new();
-    for db in [&full, &resumed] {
+    for db in [&full, &resumed, &crashed] {
         let vault = Vault::start(db, &former.master_key).await;
         unlock(&vault, &former).await;
         store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
@@ -1973,21 +2000,35 @@ async fn rotation_resumed_after_interruption_matches_a_full_run() {
         output.contains("rewritten: 1") && output.contains("already under the new key: 1"),
         "the second run did not progress from the mixed state"
     );
-    // A run killed after its last merchant row, before the hash step.
-    for (merchant_id, blob) in merchant_rows(&resumed) {
-        if let Some(dek) = opens(&former_raw, &blob) {
-            resumed.exec(&format!(
-                "UPDATE merchant SET enc_key = decode('{}', 'hex') WHERE merchant_id = '{merchant_id}'",
-                hex::encode(wrap(&new_raw, &dek))
-            ));
-        }
-    }
+    // Run again from that mixed state, with no help, until it finishes.
     let (code, output) = run_rotation(&resumed, &former, &input, &[]);
     assert_eq!(code, 0, "resumed rotation failed");
-    assert!(output.contains("complete: yes"));
+    assert!(
+        output.contains("rewritten: 1")
+            && output.contains("already under the new key: 2")
+            && output.contains("complete: yes"),
+        "the resumed run did not finish the last row"
+    );
+
+    // A run killed after its last merchant row, before the hash step: every row is under the new
+    // key, written here by the test, and the hashes are still those of the former key.
+    for (merchant_id, blob) in merchant_rows(&crashed) {
+        let dek = opens(&former_raw, &blob).expect("row under the former key");
+        crashed.exec(&format!(
+            "UPDATE merchant SET enc_key = decode('{}', 'hex') WHERE merchant_id = '{merchant_id}'",
+            hex::encode(wrap(&new_raw, &dek))
+        ));
+    }
+    let (code, output) = run_rotation(&crashed, &former, &input, &[]);
+    assert_eq!(
+        code, 0,
+        "rotation after a crash before the hash step failed"
+    );
+    assert!(output.contains("already under the new key: 3") && output.contains("complete: yes"));
 
     let state_full = canonical(&full, &former_raw, &new_raw, &before[0].0, &before[0].1);
     let state_resumed = canonical(&resumed, &former_raw, &new_raw, &before[1].0, &before[1].1);
+    let state_crashed = canonical(&crashed, &former_raw, &new_raw, &before[2].0, &before[2].1);
     let wrong = [
         "new=false",
         "former=true",
@@ -2001,7 +2042,11 @@ async fn rotation_resumed_after_interruption_matches_a_full_run() {
             .all(|line| wrong.iter().all(|bad| !line.contains(bad))),
         "the full run did not reach the expected state: {state_full:?}"
     );
-    assert_eq!(state_full, state_resumed);
+    assert_eq!(state_full, state_resumed, "resumed run");
+    assert_eq!(
+        state_full, state_crashed,
+        "run after a crash before the hash step"
+    );
 
     // Run again after a complete rotation: nothing changes.
     let snapshot = full_snapshot(&full);
@@ -2084,6 +2129,9 @@ async fn rotation_refuses_wrong_custodian_keys() {
             "{case}"
         );
         assert_no_secret(&output, &secrets);
+        for row in db.audit_rows() {
+            assert_no_secret(&row.text, &secrets);
+        }
     }
 }
 
@@ -2320,7 +2368,14 @@ async fn rotation_with_external_key_manager() {
     let vault = Vault::start_with_env(&db, &former.master_key, &env).await;
     unlock(&vault, &former).await;
     store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "ref-m1").await;
-    store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "ref-m2").await;
+    store_card_with_ref(
+        &vault,
+        MERCHANT_2,
+        CUSTOMER,
+        card_data_with(CARD_2),
+        "ref-m2",
+    )
+    .await;
     drop(vault);
     // A merchant key an older deployment left, waiting for `/key/transfer`.
     db.exec(&format!(
@@ -2344,12 +2399,15 @@ async fn rotation_with_external_key_manager() {
 
     let vault = Vault::start_with_env(&db, &new.master_key, &env).await;
     unlock(&vault, &new).await;
-    for (merchant, reference) in [(MERCHANT, "ref-m1"), (MERCHANT_2, "ref-m2")] {
+    for (merchant, reference, number) in [
+        (MERCHANT, "ref-m1", CARD_NUMBER),
+        (MERCHANT_2, "ref-m2", CARD_2),
+    ] {
         let (status, body) = vault
             .post("/data/retrieve", retrieve_request(merchant, reference))
             .await;
         assert_eq!(status, 200, "retrieve {reference}");
-        assert!(body.contains(CARD_NUMBER), "{reference} lost its card");
+        assert_card_number(&body, number, reference);
     }
     let again = store_card_as(&vault, MERCHANT, CUSTOMER, CARD_NUMBER).await;
     assert_eq!(again["payload"]["duplication_check"], "duplicated");
