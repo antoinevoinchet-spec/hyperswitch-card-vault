@@ -14,8 +14,8 @@ keyed hash of the whole number, with the key managed as a secret. This ticket re
 by a keyed one and proves it with tests. Callers of the API see no change. This is a study fork; see
 `CLAUDE.md` for what may not be claimed about it.
 
-Research report reused: `~/.claude/grand-angle/rapports/2026-11-23-hyperswitch-card-vault-empreinte-a-cle.md`
-(ideas I1, I2 and I5 adopted; I3 and I4 asked to the owner; I6 and I7 left for later).
+Research report reused: the owner's 2026-11-23 research note on this ticket, kept outside the
+repository (ideas I1, I2 and I5 adopted; I3 and I4 asked to the owner; I6 and I7 left for later).
 
 ## Current state (read in the code on 2026-11-23)
 
@@ -44,30 +44,30 @@ Research report reused: `~/.claude/grand-angle/rapports/2026-11-23-hyperswitch-c
 
 - **D1** `/data/add` stores, in `hash_table.data_hash`, a full 64-byte HMAC-SHA512 of the same bytes
   as today (JSON-serialised card number, or `enc_card_data`), no longer a plain SHA-512.
-  Vérifiable par : `grep -n 'Sha512)' src/routes/data.rs` returns nothing; e2e test D6b.
+  Verifiable by: `grep -n 'Sha512)' src/routes/data.rs` returns nothing; e2e test D6b.
 - **D2** The HMAC key is derived with HKDF-SHA512 from ring, from the tenant master key, with the
   context `info = "hyperswitch-card-vault/card-dedup/v1"` (idea I1). The derived key is never the
-  master key itself and is never logged. (Source of the secret pending: I3.)
-  Vérifiable par : unit test "derived key differs from the master key".
+  master key itself and is never logged. (Source of the secret: I3.)
+  Verifiable by: unit test "derived key differs from the master key".
 - **D3** The HMAC is plain HMAC-SHA512 from `ring::hmac`, not truncated (idea I5).
-  Vérifiable par : unit test reproducing an RFC 4231 HMAC-SHA512 vector.
+  Verifiable by: unit test reproducing an RFC 4231 HMAC-SHA512 vector.
 - **D4** Same number and same master key give the same hash; two different master keys (two tenants)
   give two different hashes; the hash differs from the plain SHA-512 of the number.
-  Vérifiable par : three unit tests.
+  Verifiable by: three unit tests.
 - **D5** An empty master key is refused with an error instead of producing a hash (error case
   required by `CLAUDE.md`).
-  Vérifiable par : unit test on the error.
+  Verifiable by: unit test on the error.
 - **D6** End to end, against a real PostgreSQL: (a) the same card stored for two merchants of the
   same tenant creates exactly one `hash_table` row; (b) the stored `data_hash` differs from the plain
   SHA-512 of `4111111111111111`, computed in the test with `ring::digest`, both with and without the
   JSON quotes.
-  Vérifiable par : two new tests in `tests/vault_e2e.rs`, run with `VAULT_TEST_REQUIRE_DB=1`.
+  Verifiable by: two new tests in `tests/vault_e2e.rs`, run with `VAULT_TEST_REQUIRE_DB=1`.
 - **D7** No change visible to a caller: same routes, same request and response bodies, same
   `duplication_check` behaviour for cards stored after the change. `make demo` still prints `DEMO OK`.
-  Vérifiable par : existing tests and `make demo`.
+  Verifiable by: existing tests and `make demo`.
 - **D8** Docs: `docs/tokenization.md` no longer describes the hash as unkeyed and cites the new unit
   test and the `file:line` of the HMAC; `README.md` lists every changed file.
-  Vérifiable par : `grep -c 'unkeyed hash' docs/tokenization.md` returns 0; README check.
+  Verifiable by: `grep -c 'unkeyed hash' docs/tokenization.md` returns 0; README check.
 
 ## Goals, non-goals, anti-goals
 
