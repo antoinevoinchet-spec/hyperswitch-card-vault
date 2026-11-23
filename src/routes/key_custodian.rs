@@ -218,7 +218,7 @@ async fn decrypt_inner(
     }
 }
 
-async fn aes_decrypt_custodian_key(
+pub async fn aes_decrypt_custodian_key(
     tenant_config: &mut TenantConfig,
     inner_key1: &str,
     inner_key2: &str,
