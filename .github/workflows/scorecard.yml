@@ -41,6 +41,8 @@ jobs:
         with:
           name: scorecard-results
           path: results.json
+          # A missing report fails the job instead of a warning.
+          if-no-files-found: error
           retention-days: 5
 
       - name: Print the score of each check
