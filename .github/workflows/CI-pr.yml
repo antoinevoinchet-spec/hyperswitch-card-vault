@@ -209,3 +209,107 @@ jobs:
           count=$(grep -c 4111111111111111 demo-output.txt || true)
           echo "test card number lines in the demo output: ${count} (at most 3 allowed)"
           test "${count}" -le 3
+
+  rehash-without-custodian:
+    name: Re-hash without the key_custodian feature
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: "postgres:alpine"
+        env:
+          POSTGRES_DB: locker
+          POSTGRES_USER: postgres
+          # Trust authentication keeps passwords out of the URLs below; the database only lives
+          # for this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          make-default: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master on 2026-11-15
+        with:
+          toolchain: stable 2 weeks ago
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run the re-hash tests without key_custodian
+        shell: bash
+        env:
+          VAULT_TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          # Fails the tests instead of skipping them if the URL above goes missing.
+          VAULT_TEST_REQUIRE_DB: "1"
+        # The count is fixed on purpose, so a filter that matches no test cannot pass: update it
+        # when a re-hash test is added or gated.
+        run: |
+          cargo test --test vault_e2e rehash_ 2>&1 | tee test-output.txt
+          grep -q 'test result: ok. 11 passed' test-output.txt || { echo "::error::expected 11 re-hash tests"; exit 1; }
+
+  rehash-kv:
+    name: Re-hash refusal with the kv feature
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    services:
+      postgres:
+        image: "postgres:alpine"
+        env:
+          POSTGRES_DB: locker
+          POSTGRES_USER: postgres
+          # Trust authentication keeps passwords out of the URLs below; the database only lives
+          # for this job.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install mold linker
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          make-default: true
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master on 2026-11-15
+        with:
+          toolchain: stable 2 weeks ago
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run the kv refusal test
+        shell: bash
+        env:
+          VAULT_TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          VAULT_TEST_REQUIRE_DB: "1"
+        # No Redis service: utils rehash starts without one, and refuses before any storage call.
+        run: |
+          cargo test --features key_custodian,kv --test vault_e2e rehash_refuses_to_run_with_kv -- --exact 2>&1 | tee test-output.txt
+          grep -q 'test result: ok. 1 passed' test-output.txt || { echo "::error::expected 1 kv test"; exit 1; }
