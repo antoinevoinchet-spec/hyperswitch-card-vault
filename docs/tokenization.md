@@ -103,7 +103,8 @@ describes it, in the [threat model table](./threat-model.md).
 - The same card stored by two merchants, or by two customers of one merchant, gets two different
   hashes and two `hash_table` rows, so the `hash_id` of their `locker` rows no longer links them.
   `duplication_check` is still returned only when the same merchant and customer add the same card
-  again, for cards whose hash was written after this change (older rows: see below). Tests: `card_dedup_two_merchants_give_two_hashes`,
+  again, for cards whose hash was written after this change or converted by the re-hash job (older
+  rows: see below). Tests: `card_dedup_two_merchants_give_two_hashes`,
   `card_dedup_two_customers_give_two_hashes`, `card_dedup_scope_framing_is_unambiguous`, and
   `same_card_for_two_merchants_gets_two_hash_rows` (`tests/vault_e2e.rs`).
 - An add of a card known only to another merchant or customer now takes the same code path as a
@@ -114,7 +115,8 @@ describes it, in the [threat model table](./threat-model.md).
 - One different path remains: when the same merchant and customer stored a card, deleted it and add it
   again, the hash row is found, because a delete removes the `locker` row and keeps the `hash_table`
   row (read in the code, `src/storage/db.rs:264-307`, not tested). Their response time may differ,
-  but it can only tell them about their own past adds.
+  but it can only tell them about their own past adds. The re-hash job's clean-up deletes such kept
+  rows of cards deleted before it runs; a delete after the job keeps its hash row again.
 
 ## What the vault does not do
 
@@ -125,7 +127,7 @@ describes it, in the [threat model table](./threat-model.md).
 - **A caller-chosen reference is not checked.** `requestor_card_reference`
   (`src/routes/data/types.rs:52`) is stored as given (`src/storage/types.rs:160-162`), so a caller
   could choose a reference that looks like a card number. The audit log replaces such an id by
-  `redacted` (`looks_like_card_number`, `src/audit.rs:66`; test `pending_redacts_card_shaped_ids`),
+  `redacted` (`looks_like_card_number`, `src/audit.rs:70`; test `pending_redacts_card_shaped_ids`),
   but the vault itself stores it. As a side effect, about one in ten purely numeric ids of 13 to 19
   digits also passes the Luhn check and is redacted in the audit log (review note M1).
 - **Rows written before the keyed hash are not converted.** Until this fork's fix, the duplicate
@@ -133,16 +135,43 @@ describes it, in the [threat model table](./threat-model.md).
   trying every candidate number. No lookup matches those old rows any more (read in the code, not
   tested): a card stored before the fix and added again gets a new row, and for the same merchant and
   customer a second stored copy, without `duplication_check`. The old values stay readable until they
-  are deleted. This fork holds no real card, so no migration is provided; a real deployment would
-  need a one-off job that decrypts each stored card, recomputes the keyed hash and deletes the old
-  values.
-- **Rows written before the merchant scope are not converted either.** Hashes stored under the
-  tenant-wide `v1` context are never matched by the `v2` lookup (test
-  `tenant_wide_v1_hash_row_is_not_matched`). So a card stored before the change and added again by
-  the same merchant and customer gets a second stored copy, without `duplication_check`, and the
-  old `locker` rows keep their shared `hash_id`, which still links merchants and customers until
-  those rows are deleted. No migration is provided here; a reusable re-hash job, also needed after a
-  change of master key, is the planned next step.
+  are deleted. The re-hash job described below replaces them too, through the same comparison of
+  each cited hash with the recomputed one; this case is not tested with plain SHA-512 values.
+- **Rows written before the merchant scope are converted only once the re-hash job has run.**
+  Until then, hashes stored under the tenant-wide `v1` context are never matched by the `v2` lookup
+  (test `tenant_wide_v1_hash_row_is_not_matched`): a card stored before the change and added again
+  by the same merchant and customer gets a second stored copy, without `duplication_check`, and the
+  old `locker` rows keep their shared `hash_id`, which links merchants and customers.
+- **The re-hash job.** `utils rehash --tenant <id>` (`src/bin/utils.rs`, job in
+  `src/domain/hash.rs`) decrypts each stored card, recomputes the hash that `/data/add` computes
+  today, points the `locker` row at it, deletes each old hash row that no row cites any more
+  (`src/storage/db.rs:544-546`), and at the end deletes unused rows created more than one minute
+  before the run (`src/storage/db.rs:585-587`). Nothing about progress is stored: each row is
+  recomputed, so a second run changes nothing and a run stopped half-way is resumed by running it
+  again. Tests (`tests/vault_e2e.rs`): `rehash_moves_v1_rows_to_scoped_hashes`,
+  `rehash_twice_changes_nothing`, `rehash_resumed_after_interruption_matches_a_full_run`,
+  `rehash_detaches_the_older_duplicate`, `rehash_on_an_empty_tenant_changes_nothing`.
+- **How to run it.** Stop the vault, run the command, start the vault again. With the
+  `key_custodian` feature, the two custodian keys are read from standard input, one per line:
+  pipe them from a file only the custodians can read, or type them with echo off (for example with
+  the shell's `read -s`), never as arguments, so they stay off the screen and out of the shell
+  history. The command prints counts only; it exits 0 when every row is done, 2 when `--max-rows`
+  stopped it (run it again to resume) and 1 on an error, whose message names the error kind only.
+  A wrong custodian key changes nothing (test `rehash_refuses_wrong_custodian_keys`).
+- **What the audit log keeps of it.** One `rehash_row` entry per changed row, with merchant,
+  customer and card reference, written before the change (it records the attempt), and one
+  `rehash_run` entry per run (its result). If an entry cannot be written, the job stops and the row
+  is unchanged. Tests: `rehash_audit_rows_hold_no_card_or_key`,
+  `rehash_stops_when_audit_table_is_unwritable`.
+- **What the job leaves.** A card stored twice by the same merchant and customer (once before the
+  change, once after) keeps both copies: the older one is detached, that is, it gets a `hash_id`
+  that matches no hash row, so it links no one, both card references still return the card, and
+  later adds find the newer copy and return `duplicated`. Run next to a live vault, an add during
+  the run can create such a duplicate, which a second run handles, and the vault's in-memory cache
+  (`src/storage/caching.rs:50-64`) may keep a hash row that the clean-up deleted until the vault
+  restarts. Not tested: the refusal to run with the `kv` feature, a run without the
+  `key_custodian` feature, two writers changing the same row at once (the update then changes no
+  row and the job stops), and the removal of deleted rows from the cache.
 - **The master key must stay a real secret even with an external key manager.** With the
   `external_key_manager` feature enabled, the cards are encrypted by the external service
   (`src/crypto/keymanager.rs:59-67`) and `tenant_secrets.master_key` no longer protects them, but it
@@ -150,7 +179,10 @@ describes it, in the [threat model table](./threat-model.md).
   placeholder or public value there would make the duplicate-check hash computable by anyone again.
 - **A change of master key would change every duplicate-check hash**, since the key is derived from
   it. The design (`docs/superpowers/specs/2026-11-23-keyed-card-hash-design.md`, decision I3)
-  describes how to keep the current key in that case. Key rotation is not implemented.
+  describes how to keep the current key in that case. Key rotation itself (re-encrypting each
+  merchant key under a new master key) is not implemented. Once it is, the re-hash job brings every
+  hash to the new key, since it needs only the current key (test
+  `rehash_converges_rows_hashed_under_another_master_key`).
 - **No per-caller access rules or masking** on retrieval (a later phase of this fork may study
   them).
 - **Custodian unlock before the database role is narrowed.** Since custodian steps are recorded in
