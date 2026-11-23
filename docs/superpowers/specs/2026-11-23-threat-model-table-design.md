@@ -1,7 +1,7 @@
 # Threat model table: design
 
 Date: 2026-11-23. Branch: `chore/threat-model-table` (from `main`, `7d1bdfb`). Status: owner
-decisions Q1 to Q3 taken; waiting for approval of the design.
+decisions Q1 to Q3 taken; plan written.
 
 ## Intent
 
@@ -38,7 +38,8 @@ Research report reused: the owner's 2026-11-23 research note on the fork's next 
   known.
   Verifiable by: `grep -c '| open |' docs/threat-model.md` is at least 8, and a row-by-row read.
 - **D4** Every test name cited exists in `src/` or `tests/` as a function; every `file:line` or
-  `file:start-end` cited exists and every cited line is non-empty; every quoted `make demo` check
+  `file:start-end` cited exists, and the cited line (for a range, its first and last lines) is
+  non-empty; every quoted `make demo` check
   appears in `demo/run.sh`.
   Verifiable by: `scripts/check-threat-model.sh` exits 0 on the final table.
 - **D5** The script exits non-zero on a copy of the table with an invented test name, and on a copy
@@ -134,10 +135,8 @@ re-run the evidence (`cargo test -j 4`, the end-to-end command, `make demo`) and
   `card_dedup_rejects_empty_master_key`.
 - T11 The duplicate check stops working (one card, two rows): `same_card_for_two_merchants_shares_one_hash_row`,
   `card_dedup_same_card_same_key_gives_same_hash`.
-- T12 The fingerprint can be computed without the caller's key, at the primitive level:
-  `test_key_not_equal`, `test_key_equal`. The row says that the route itself is not tested.
-
-`not tested`: T13 per-merchant key separation; T14 data calls while locked; T15 unknown tenant;
+`not tested`: T12 the fingerprint can be computed without the caller's key (`test_key_not_equal`
+and `test_key_equal` test the primitive only, not the route); T13 per-merchant key separation; T14 data calls while locked; T15 unknown tenant;
 T16 JWE envelope on requests; T17 generated reference is a random UUID.
 
 `open`: T18 to T25, the eight limits of D3. Two more from `demo/README.md` "Known limits":
@@ -148,20 +147,18 @@ database change has happened when the audit write fails.
 
 `scripts/check-threat-model.sh [table.md]` (default `docs/threat-model.md`), POSIX tools only (`bash`,
 `awk`, `grep`, `sed`, `wc`), so it runs on macOS and on the CI runner without installing anything.
-For each table row (a line starting with `| T`):
-
-1. the status cell is `proven`, `not tested` or `open`;
-2. every backticked `path:N` or `path:N-M` names an existing file, `N ≤ M ≤` line count, and every
-   line in the range is non-empty;
-3. every backticked identifier made of lowercase letters, digits and underscores that contains an
-   underscore is a test name: `grep -r -E "fn NAME\(" src tests` must find it;
-4. every quoted demo check (text between `“demo:` markers, exact format fixed in the plan) is found
-   with `grep -F` in `demo/run.sh`;
-5. a `proven` row cites at least one test name or demo check;
-6. the table has at least 12 rows.
+It reads no `.env` file and no configuration. The twelve rules it enforces are listed in the plan
+(`docs/superpowers/plans/2026-11-23-threat-model-table.md`, Task 1). In short: every table line is a
+`T<n>` row of exactly six cells with a unique ID and a valid status; every backticked `path:N` or
+`path:N-M` exists and points to non-empty lines; a test name (a backticked snake_case word in
+Evidence) is a function under `#[test]` or `#[tokio::test]` in `src/` or `tests/`; a demo check label
+is printed by `demo/run.sh`; a `proven` row cites a test or demo check, an `open` row cites the doc
+lines that describe it; Control is `none` or cites code; Attack holds no code; at least 12 rows; no
+reference to the private upstream report.
 
 It prints one line per failure (`T7: test not found: foo_bar`) and a summary per status, and exits 1
-if anything failed. It reads no `.env` file and no configuration.
+if anything failed. It proves that references exist, not that they mean what the row says: that is
+the reviewer's job.
 
 ## Decisions for the owner
 
@@ -179,9 +176,11 @@ if anything failed. It reads no `.env` file and no configuration.
 ## Calls made by the builder
 
 - Rows grouped by status rather than by component, so the reader sees what is proven first.
-- A row that a test proves only at the primitive level says so in its threat text (T12).
+- A protection tested only at the primitive level, not on its own route, is `not tested` (T12,
+  T16), following the owner's rule.
 - `docs/tokenization.md` keeps its own references; the script checks only the table (checking the
-  whole doc is a later option).
+  whole doc is a later option). Its link sentence is added before the table cites it, so cited
+  lines do not shift.
 
 ## Later work (decided, not in this ticket)
 
