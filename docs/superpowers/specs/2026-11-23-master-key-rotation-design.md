@@ -222,7 +222,8 @@ the vault must not be started: some merchants open only under one key and some o
 
 - `MerchantInterface`: read a batch of encrypted merchant rows after an `id` cursor; update one
   row's `enc_key` from an expected old value. Bound parameters only. The cache forwards both without
-  caching, and drops the merchant's cached entry on update.
+  caching. No cached entry needs dropping: the decrypted merchant key is the same before and after,
+  and the command reads no merchant through the cache before rewriting it.
 
 ### Audit (`src/audit.rs`)
 
@@ -232,7 +233,7 @@ through `audit::record` and `PendingAudit`, as for the re-hash job.
 ### Files
 
 `src/bin/utils.rs`, `src/domain.rs` and `src/domain/master_key.rs`, `src/storage.rs`,
-`src/storage/db.rs`, `src/storage/caching/merchant.rs`, `src/audit.rs`, `tests/vault_e2e.rs`,
+`src/storage/types.rs`, `src/storage/db.rs`, `src/storage/caching/merchant.rs`, `src/audit.rs`, `tests/vault_e2e.rs`,
 `.github/workflows/CI-pr.yml` (added jobs only: rotation without `key_custodian`, `kv` refusal,
 external key manager), `docs/threat-model.md`, `docs/tokenization.md`,
 `README.md`, this design and its plan.
