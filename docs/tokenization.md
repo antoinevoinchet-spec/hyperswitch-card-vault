@@ -10,6 +10,9 @@ Reversible Tokens*, information supplement, version 1.0, April 2015
 (https://listings.pcisecuritystandards.org/documents/Tokenization_Product_Security_Guidelines.pdf,
 read on 2026-11-23). Page numbers below refer to that document.
 
+Each protection and each known limit is also listed, with the test that proves it or the text that
+describes it, in the [threat model table](./threat-model.md).
+
 ## The vocabulary, in short
 
 - **Tokenization**: "a process by which a surrogate value, called a 'token,' replaces the primary
