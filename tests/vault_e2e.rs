@@ -25,6 +25,12 @@ const CUSTOMER: &str = "demo-customer";
 fn admin_url() -> Option<String> {
     let url = std::env::var("VAULT_TEST_DATABASE_URL").ok();
     if url.is_none() {
+        // The CI job that provides a database sets this, so a missing URL fails there instead of
+        // skipping every test.
+        assert!(
+            std::env::var_os("VAULT_TEST_REQUIRE_DB").is_none(),
+            "VAULT_TEST_REQUIRE_DB is set but VAULT_TEST_DATABASE_URL is not"
+        );
         println!("skipped: VAULT_TEST_DATABASE_URL not set");
     }
     url
@@ -306,7 +312,12 @@ async fn retrieve_fails_closed_when_audit_table_is_unwritable() {
     db.exec("ALTER TABLE audit_log_blocked RENAME TO audit_log");
 
     assert_eq!(status, 500);
+    assert!(
+        body.contains("audit_log"),
+        "the 500 must come from the audit write"
+    );
     assert!(!body.contains(CARD_NUMBER));
+    assert!(!body.contains("card_number"));
 }
 
 async fn send_key(vault: &Vault, step: &str, key: &str) -> u16 {

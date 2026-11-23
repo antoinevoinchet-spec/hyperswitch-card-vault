@@ -182,6 +182,8 @@ jobs:
         shell: bash
         env:
           VAULT_TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          # Fails the tests instead of skipping them if the URL above goes missing.
+          VAULT_TEST_REQUIRE_DB: "1"
         run: cargo test --features key_custodian --test vault_e2e
 
       - name: Create the demo database
