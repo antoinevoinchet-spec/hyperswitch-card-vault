@@ -1,7 +1,7 @@
 # Re-hash job for the duplicate-check hash (R1): design
 
-Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; decisions W1, W2
-and W3 are open for the owner.
+Date: 2026-11-23. Branch: `feat/rehash-job` (from `main`, `d914a8b`). Status: draft; W1 taken by the owner,
+W2 and W3 open.
 
 ## Intent
 
@@ -90,12 +90,12 @@ None of them settles where such a job should run.
   card number, the hex of any hash, the master key or either custodian key.
 - **D7** If an audit row cannot be written, the job stops with an error and the `locker` row it was
   about to change is unchanged.
-  Verifiable by: e2e test that makes `audit_log` unwritable, runs the job, expects HTTP 500 (or a
-  non-zero exit) and unchanged `locker` rows.
+  Verifiable by: e2e test that makes `audit_log` unwritable, runs the job, expects a non-zero exit
+  and unchanged `locker` rows.
 - **D8** The job never writes a card number, a hash value or a key to a log, a response body or an
   error message. Its output holds counts and a cursor only.
-  Verifiable by: e2e test checking the response body and the vault's log file for the card number
-  and key values; code read: no `logger` call takes decrypted data.
+  Verifiable by: e2e test checking the command's standard output and error for the card number,
+  the hash values and the key values; code read: no `logger` call takes decrypted data.
 - **D9** The counts balance: rows examined = already current + moved + handled as duplicate; if
   they do not, the batch fails before its final clean-up.
   Verifiable by: unit test on the balance check (the error case required by `CLAUDE.md`).
@@ -159,19 +159,32 @@ inserted but not yet cited. This removes `v1` rows whose cards were deleted befo
 also the current rows of cards their owners deleted (T29): after the job, such a re-add takes the
 new-card path until the next delete.
 
-### Running while the vault serves requests
+### Where it runs (W1 = B)
 
-The job runs against a live vault. An add of a card not yet processed creates the duplicate of W2;
-the job handles it like any other. Nothing locks the tables.
+A subcommand `utils rehash --tenant <id> [--max-rows <n>]` of the existing `utils` binary
+(`src/bin/utils.rs`). It reads the same configuration as the vault (`GlobalConfig::new`, file and
+`LOCKER__` environment variables), builds the tenant state with `TenantConfig::from_global_config`
+and `TenantAppState::new`, both already public, and calls one public function of
+`src/domain/hash.rs`, which holds the job. Under `key_custodian`, the two custodian keys are read
+from standard input, one per line, never from the command line (which other users of the machine
+can see), and the master key is unlocked by the same function as `/custodian/decrypt`
+(`aes_decrypt_custodian_key`, `src/routes/key_custodian.rs:221-240`, made public). Without
+`key_custodian`, the master key comes from the configuration, as in the vault.
 
-### Where it runs (W1, recommended A)
+It prints only counts (`examined`, `current`, `moved`, `duplicates`, `removed_hash_rows`) and
+exits 0 when every row is current; any error gives a non-zero exit and a message without data.
+`--max-rows` stops after that many rows (the interruption used by the tests); running the command
+again resumes. The job runs in the command's own process, so the vault never gains a route that
+decrypts every card.
 
-A route `POST /custodian/rehash`, added to `src/routes/key_custodian.rs`, reachable only once the
-tenant is unlocked (it resolves the unlocked tenant state, otherwise `CustodianLocked`). Body
-`{ "limit": <rows per batch>, "after": <cursor or null> }`; response `{ "examined", "current",
-"moved", "duplicates", "removed_hash_rows", "next": <cursor or null> }`. The caller loops until
-`next` is null. The custodian router already exists only with the `key_custodian` feature, which the
-e2e tests and the demo use.
+### Running next to a live vault
+
+Recommended operation: stop the vault, run the command, start the vault again. If the vault keeps
+running, two effects remain, both described in `docs/tokenization.md`: an add of a card not yet
+processed creates the duplicate of W2, which a second run handles; and the vault's in-memory cache
+(time-to-idle only, `src/storage/caching.rs:50-64`) may still hold a hash row that the final
+clean-up deleted, which matters only for a card deleted before the job and added again before the
+vault restarts.
 
 ### New storage primitives (`src/storage.rs`, `src/storage/db.rs`, cache layer)
 
@@ -190,7 +203,8 @@ and `PendingAudit`, so ids are cleaned and card-shaped ids redacted as elsewhere
 
 ### Files
 
-`src/routes/key_custodian.rs` (route), `src/domain/hash.rs` (job), `src/storage.rs`,
+`src/bin/utils.rs` (subcommand), `src/routes/key_custodian.rs` (unlock function made public),
+`src/domain/hash.rs` (job), `src/storage.rs`,
 `src/storage/db.rs`, `src/storage/caching/hash_table.rs` (and the locker cache file if one forwards
 the trait), `src/audit.rs` (operations), `tests/vault_e2e.rs`, `docs/threat-model.md`,
 `docs/tokenization.md`, `README.md`, this design and its plan. Possibly `src/routes/data/types.rs`
@@ -204,15 +218,18 @@ the modifiable list, asked before any change.
 - T22: per W3.
 - T29: wording notes that the job's clean-up removes the kept hash rows of deleted cards; stays
   `open` (a delete after the job keeps its hash row again).
-- New row (`open`): the re-hash route can be called by anyone who can reach the custodian routes of
-  an unlocked vault (no finer access rule, like T19); it reveals only counts.
+- New row (`open`): run next to a live vault, the job can leave a duplicate created during the run
+  until a second run, and the vault's cache can keep a deleted hash row until restart (the
+  `docs/tokenization.md` lines that describe it).
 - T3/T5/T6 evidence may gain the new audit tests; moved `file:line` references corrected.
 
 ## Decisions for the owner
 
-- **W1** where the job runs: open. A, a route `POST /custodian/rehash`, usable only after the two
-  custodians have unlocked the tenant (recommended); B, a `utils rehash` command that reads the
-  configuration and asks both custodian keys at the terminal.
+- **W1** where the job runs: **B, a `utils rehash` command** (owner, 2026-11-23). Option A, a route
+  `POST /custodian/rehash` after unlock, was rejected: it would add, for good, a network entry
+  point outside the JWE middleware that decrypts every card of the tenant, for a job run once; its
+  cache advantage holds only for a single vault instance. Accepted cost of B: the master key also
+  lives, for the run, in the command's process, and the custodians type their keys into it.
 - **W2** duplicate of the same card for the same merchant and customer: open. A, detach the older
   row (recommended); B, leave it on its old hash and report it; C, delete the older row.
 - **W3** T22: open. A, the job converges rows under any previous key and a test proves it, master
