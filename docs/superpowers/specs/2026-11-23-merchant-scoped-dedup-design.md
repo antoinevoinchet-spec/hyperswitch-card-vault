@@ -1,7 +1,7 @@
 # Merchant-scoped duplicate-check hash (I6): design
 
 Date: 2026-11-23. Branch: `feat/merchant-scoped-dedup` (from `main`, `dcbe7c1`). Status: draft;
-decisions S1, S2 and S3 are the owner's and are not taken yet.
+decision S1 taken by the owner (merchant and customer); S2 and S3 not taken yet.
 
 ## Intent
 
@@ -162,7 +162,8 @@ Every value stored under `v1` is tenant-wide. After the change, no lookup can ma
 
 ## Decisions for the owner
 
-- **S1** scope: **A, merchant and customer** (recommended) or **B, merchant only**. A closes T24
+- **S1** scope: **merchant and customer** (owner, 2026-11-23; option A). Option B, merchant only,
+  was rejected. Reasoning given to the owner: A closes T24
   also between customers of one merchant and leaves no T25 branch about others; it loses nothing a
   caller sees, since `duplicated` is already only reported for the same merchant and customer. Cost:
   one `hash_table` row per card, merchant and customer instead of per card and tenant.
