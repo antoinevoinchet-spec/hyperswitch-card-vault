@@ -102,8 +102,9 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/tokenization.md`: describes the per-caller rule on reads and what it leaves open.
   - `docs/superpowers/specs/2026-11-24-per-caller-read-control-design.md` and `docs/superpowers/plans/2026-11-24-per-caller-read-control.md`: design and implementation plan, with the breakage runs.
 - Documentation catch-up after the merchant key isolation and the per-caller read control (no code change):
-  - `docs/tokenization.md`: with the `middleware` feature, responses are described as JWE-encrypted, signed only when the caller asks for it on the fingerprint route, instead of all signed.
+  - `docs/tokenization.md`: with the `middleware` feature, responses are described as JWE-encrypted, signed, then encrypted, or signed only when the caller asks for it on the fingerprint route, instead of only signed.
   - `docs/threat-model.md`: T20 cites the custodian unlock passage, a stray mark removed from T21, moved line references; new open rows T37 (any caller of a tenant can add or delete cards of any of its merchants) and T38 (a card ciphertext is not bound to its row), referenced from T19 and T13.
+  - `README.md`: this entry.
 
 ## Demo
 
