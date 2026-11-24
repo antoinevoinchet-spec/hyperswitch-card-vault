@@ -25,19 +25,28 @@ use crate::{
 pub async fn delete_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Json(request): Json<types::DeleteDataRequest>,
 ) -> Result<Json<types::DeleteDataResponse>, ContainerError<error::ApiError>> {
     let pending =
         audit::delete_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = delete_data_inner(Arc::clone(&tenant_app_state), request).await;
+    let result = delete_data_inner(Arc::clone(&tenant_app_state), caller_key, request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
 
 #[tracing::instrument(skip_all)]
 async fn delete_data_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     request: types::DeleteDataRequest,
 ) -> Result<Json<types::DeleteDataResponse>, ContainerError<error::ApiError>> {
+    authorize_caller(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.entity_id,
+        CallerRight::Delete,
+    )?;
+
     let _entity = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.entity_id.clone())
         .await?;
@@ -143,20 +152,29 @@ async fn retrieve_data_inner(
 pub async fn add_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Query(params): Query<types::StoreDataRequestQueryParams>,
     Json(request): Json<types::StoreDataRequest>,
 ) -> Result<Json<types::StoreDataResponse>, ContainerError<error::ApiError>> {
     let pending = audit::store_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = add_data_inner(Arc::clone(&tenant_app_state), params, request).await;
+    let result = add_data_inner(Arc::clone(&tenant_app_state), caller_key, params, request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
 
 #[tracing::instrument(skip_all)]
 async fn add_data_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     params: types::StoreDataRequestQueryParams,
     request: types::StoreDataRequest,
 ) -> Result<Json<types::StoreDataResponse>, ContainerError<error::ApiError>> {
+    authorize_caller(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.entity_id,
+        CallerRight::Add,
+    )?;
+
     request.validate()?;
 
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
