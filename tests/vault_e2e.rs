@@ -3693,3 +3693,68 @@ async fn data_routes_are_refused_before_unlock() {
     assert_eq!(status, 200, "retrieve once unlocked");
     assert_card_number(&body, CARD_NUMBER, &reference);
 }
+
+/// T17: a card reference the vault generates is an RFC 9562 UUID version 7 (version and variant
+/// bits, a timestamp of now), unique, and holds no card number; a reference the
+/// caller supplies is kept as is.
+#[tokio::test]
+async fn generated_card_reference_is_a_uuid_v7() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    let now_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after 1970")
+                .as_millis(),
+        )
+        .expect("milliseconds fit in u64")
+    };
+    let start = now_ms();
+    let mut references = Vec::new();
+    for (customer, number) in [(CUSTOMER, CARD_NUMBER), (CUSTOMER_2, CARD_2), (CUSTOMER, CARD_2)] {
+        let response = store_card_as(&vault, MERCHANT, customer, number).await;
+        references.push(
+            response["payload"]["card_reference"]
+                .as_str()
+                .expect("card_reference")
+                .to_string(),
+        );
+    }
+    let end = now_ms();
+
+    for reference in &references {
+        assert_eq!(reference.len(), 36, "hyphenated form: {reference}");
+        let uuid = uuid::Uuid::parse_str(reference).expect("a UUID");
+        let bytes = uuid.as_bytes();
+        assert_eq!(bytes[6] >> 4, 0b0111, "version 7: {reference}");
+        assert_eq!(bytes[8] >> 6, 0b10, "RFC 9562 variant: {reference}");
+        let mut ms = [0u8; 8];
+        ms[2..].copy_from_slice(&bytes[..6]);
+        let ms = u64::from_be_bytes(ms);
+        assert!(
+            (start.saturating_sub(5_000)..=end + 5_000).contains(&ms),
+            "timestamp of the add: {reference}"
+        );
+        let digits: String = reference.chars().filter(char::is_ascii_digit).collect();
+        assert!(
+            !digits.contains(CARD_NUMBER) && !digits.contains(CARD_2),
+            "no card number in {reference}"
+        );
+    }
+    let mut unique = references.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), references.len(), "each reference is new");
+    let stored: Vec<String> = db.locker_rows().into_iter().map(|row| row.locker_id).collect();
+    for reference in &references {
+        assert!(stored.contains(reference), "stored under {reference}");
+    }
+
+    let supplied = store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "caller-ref-1").await;
+    assert_eq!(supplied["payload"]["card_reference"], "caller-ref-1", "supplied reference kept");
+}
