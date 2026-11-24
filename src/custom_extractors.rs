@@ -136,25 +136,44 @@ impl FromRequestParts<Arc<GlobalAppState>> for OptionalCallerKey {
     }
 }
 
-/// Decides whether a caller may read the data of `merchant_id` (a v2 `entity_id` alike).
+/// What a caller asks to do with the data of a merchant (a v2 entity alike).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallerRight {
+    Read,
+    Add,
+    Delete,
+}
+
+impl CallerRight {
+    /// The word that grants this right in a caller's `rights`.
+    fn word(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Add => "add",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Decides whether a caller may use `right` on the data of `merchant_id` (a v2 `entity_id` alike).
 ///
-/// With no caller configured for the tenant, every read is allowed, as before this check existed.
-/// Otherwise the key must match one caller (by its SHA-256) and `merchant_id` must be on that
-/// caller's list. Runs before any key or row is loaded.
-pub fn authorize_read(
+/// A tenant with no caller configured refuses every call (decision D-A of T37). Otherwise the key
+/// must match one caller (by its SHA-256), and one caller with that key must list both
+/// `merchant_id` in its merchants and the word of `right` in its rights. Runs before any key or row
+/// is loaded.
+pub fn authorize_caller(
     callers: &std::collections::HashMap<String, CallerConfig>,
     caller_key: Option<&Secret<String>>,
     merchant_id: &str,
+    right: CallerRight,
 ) -> Result<(), ApiError> {
-    if callers.is_empty() {
-        return Ok(());
-    }
     let key = caller_key.ok_or(ApiError::CallerKeyMissingOrUnknown)?;
     let key_hash = hex::encode(ring::digest::digest(
         &ring::digest::SHA256,
         key.peek().as_bytes(),
     ));
-    // Every caller with this key counts, so two entries sharing a key do not depend on map order.
+    // Every caller with this key counts, so two entries sharing a key do not depend on map order;
+    // a merchant and a right must come from the same entry.
     let mut matching = callers
         .values()
         .filter(|caller| *caller.key_hash.peek() == key_hash)
@@ -162,12 +181,13 @@ pub fn authorize_read(
     if matching.peek().is_none() {
         return Err(ApiError::CallerKeyMissingOrUnknown);
     }
-    if matching.any(|caller| {
-        caller
-            .merchants
-            .split(',')
-            .any(|allowed| !allowed.is_empty() && allowed == merchant_id)
-    }) {
+    let lists = |list: &str, wanted: &str| {
+        list.split(',')
+            .any(|item| !item.is_empty() && item == wanted)
+    };
+    if matching
+        .any(|caller| lists(&caller.merchants, merchant_id) && lists(&caller.rights, right.word()))
+    {
         Ok(())
     } else {
         Err(ApiError::CallerNotAllowed)
@@ -181,7 +201,7 @@ mod caller_tests {
 
     use hyperswitch_masking::Secret;
 
-    use super::{OptionalCallerKey, authorize_read};
+    use super::{CallerRight, OptionalCallerKey, authorize_caller};
     use crate::{config::CallerConfig, error::ApiError};
 
     const KEY: &str = "caller-key-for-unit-tests-only";
@@ -199,6 +219,7 @@ mod caller_tests {
             CallerConfig {
                 key_hash: sha256_hex(KEY).into(),
                 merchants: merchants.to_string(),
+                rights: "read".to_string(),
             },
         )])
     }
@@ -207,15 +228,116 @@ mod caller_tests {
         Secret::new(value.to_string())
     }
 
+    const ALL: [CallerRight; 3] = [CallerRight::Read, CallerRight::Add, CallerRight::Delete];
+
+    fn caller_with_rights(merchants: &str, rights: &str) -> HashMap<String, CallerConfig> {
+        let mut map = callers(merchants);
+        map.get_mut("reader").unwrap().rights = rights.to_string();
+        map
+    }
+
     #[test]
-    fn authorize_read_allows_any_read_without_callers() {
-        assert!(authorize_read(&HashMap::new(), None, "m1").is_ok());
+    fn authorize_caller_refuses_every_call_without_callers() {
+        for right in ALL {
+            for key in [None, Some(&key(KEY))] {
+                assert!(matches!(
+                    authorize_caller(&HashMap::new(), key, "m1", right),
+                    Err(ApiError::CallerKeyMissingOrUnknown)
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn authorize_caller_allows_only_the_listed_rights() {
+        for granted in ALL {
+            let map = caller_with_rights("m1", granted.word());
+            for asked in ALL {
+                let result = authorize_caller(&map, Some(&key(KEY)), "m1", asked);
+                if asked == granted {
+                    assert!(result.is_ok(), "{granted:?} allows {asked:?} for m1");
+                } else {
+                    assert!(matches!(result, Err(ApiError::CallerNotAllowed)));
+                }
+                // An unlisted merchant stays refused whatever the right.
+                assert!(matches!(
+                    authorize_caller(&map, Some(&key(KEY)), "m2", asked),
+                    Err(ApiError::CallerNotAllowed)
+                ));
+            }
+        }
+        let none = caller_with_rights("m1", "");
+        for asked in ALL {
+            assert!(matches!(
+                authorize_caller(&none, Some(&key(KEY)), "m1", asked),
+                Err(ApiError::CallerNotAllowed)
+            ));
+        }
+    }
+
+    #[test]
+    fn authorize_caller_reads_by_default() {
+        let config: CallerConfig = serde_json::from_value(
+            serde_json::json!({ "key_hash": sha256_hex(KEY), "merchants": "m1" }),
+        )
+        .unwrap();
+        let map = HashMap::from([("reader".to_string(), config)]);
+        assert!(authorize_caller(&map, Some(&key(KEY)), "m1", CallerRight::Read).is_ok());
+        for asked in [CallerRight::Add, CallerRight::Delete] {
+            assert!(matches!(
+                authorize_caller(&map, Some(&key(KEY)), "m1", asked),
+                Err(ApiError::CallerNotAllowed)
+            ));
+        }
+    }
+
+    #[test]
+    fn authorize_caller_ignores_unknown_rights() {
+        let typo = caller_with_rights("m1", "write");
+        for asked in ALL {
+            assert!(matches!(
+                authorize_caller(&typo, Some(&key(KEY)), "m1", asked),
+                Err(ApiError::CallerNotAllowed)
+            ));
+        }
+        // With a space, only the word spelled exactly counts: `read` is granted, ` add` is not.
+        let spaced = caller_with_rights("m1", "read, add");
+        assert!(authorize_caller(&spaced, Some(&key(KEY)), "m1", CallerRight::Read).is_ok());
+        assert!(matches!(
+            authorize_caller(&spaced, Some(&key(KEY)), "m1", CallerRight::Add),
+            Err(ApiError::CallerNotAllowed)
+        ));
+    }
+
+    #[test]
+    fn authorize_caller_does_not_mix_two_callers_rights() {
+        let mut two = caller_with_rights("m1", "add");
+        two.insert(
+            "second".to_string(),
+            CallerConfig {
+                key_hash: sha256_hex(KEY).into(),
+                merchants: "m2".to_string(),
+                rights: "delete".to_string(),
+            },
+        );
+        for _ in 0..20 {
+            assert!(matches!(
+                authorize_caller(&two, Some(&key(KEY)), "m2", CallerRight::Add),
+                Err(ApiError::CallerNotAllowed)
+            ));
+            assert!(matches!(
+                authorize_caller(&two, Some(&key(KEY)), "m1", CallerRight::Delete),
+                Err(ApiError::CallerNotAllowed)
+            ));
+            assert!(authorize_caller(&two, Some(&key(KEY)), "m1", CallerRight::Add).is_ok());
+            assert!(authorize_caller(&two, Some(&key(KEY)), "m2", CallerRight::Delete).is_ok());
+        }
     }
 
     #[test]
     fn authorize_read_refuses_a_missing_key() {
         assert!(matches!(
-            authorize_read(&callers("m1"), None, "m1"),
+            authorize_caller(&callers("m1"), None, "m1", CallerRight::Read),
             Err(ApiError::CallerKeyMissingOrUnknown)
         ));
     }
@@ -223,25 +345,32 @@ mod caller_tests {
     #[test]
     fn authorize_read_refuses_an_unknown_key() {
         assert!(matches!(
-            authorize_read(&callers("m1"), Some(&key("another-key")), "m1"),
+            authorize_caller(
+                &callers("m1"),
+                Some(&key("another-key")),
+                "m1",
+                CallerRight::Read
+            ),
             Err(ApiError::CallerKeyMissingOrUnknown)
         ));
     }
 
     #[test]
     fn authorize_read_allows_a_listed_merchant() {
-        assert!(authorize_read(&callers("m1,m2"), Some(&key(KEY)), "m2").is_ok());
+        assert!(
+            authorize_caller(&callers("m1,m2"), Some(&key(KEY)), "m2", CallerRight::Read).is_ok()
+        );
     }
 
     #[test]
     fn authorize_read_refuses_an_unlisted_merchant() {
         assert!(matches!(
-            authorize_read(&callers("m1"), Some(&key(KEY)), "m2"),
+            authorize_caller(&callers("m1"), Some(&key(KEY)), "m2", CallerRight::Read),
             Err(ApiError::CallerNotAllowed)
         ));
         // A prefix or a part of a listed id is not that id.
         assert!(matches!(
-            authorize_read(&callers("m10"), Some(&key(KEY)), "m1"),
+            authorize_caller(&callers("m10"), Some(&key(KEY)), "m1", CallerRight::Read),
             Err(ApiError::CallerNotAllowed)
         ));
     }
@@ -249,11 +378,11 @@ mod caller_tests {
     #[test]
     fn authorize_read_with_an_empty_list_refuses_every_merchant() {
         assert!(matches!(
-            authorize_read(&callers(""), Some(&key(KEY)), ""),
+            authorize_caller(&callers(""), Some(&key(KEY)), "", CallerRight::Read),
             Err(ApiError::CallerNotAllowed)
         ));
         assert!(matches!(
-            authorize_read(&callers(""), Some(&key(KEY)), "m1"),
+            authorize_caller(&callers(""), Some(&key(KEY)), "m1", CallerRight::Read),
             Err(ApiError::CallerNotAllowed)
         ));
     }
@@ -263,7 +392,7 @@ mod caller_tests {
         let mut upper = callers("m1");
         upper.get_mut("reader").unwrap().key_hash = sha256_hex(KEY).to_uppercase().into();
         assert!(matches!(
-            authorize_read(&upper, Some(&key(KEY)), "m1"),
+            authorize_caller(&upper, Some(&key(KEY)), "m1", CallerRight::Read),
             Err(ApiError::CallerKeyMissingOrUnknown)
         ));
     }
@@ -276,12 +405,13 @@ mod caller_tests {
             CallerConfig {
                 key_hash: sha256_hex(KEY).into(),
                 merchants: "m2".to_string(),
+                rights: "read".to_string(),
             },
         );
         // Whatever order the map yields, each listed merchant is allowed.
         for _ in 0..20 {
-            assert!(authorize_read(&two, Some(&key(KEY)), "m1").is_ok());
-            assert!(authorize_read(&two, Some(&key(KEY)), "m2").is_ok());
+            assert!(authorize_caller(&two, Some(&key(KEY)), "m1", CallerRight::Read).is_ok());
+            assert!(authorize_caller(&two, Some(&key(KEY)), "m2", CallerRight::Read).is_ok());
         }
     }
 

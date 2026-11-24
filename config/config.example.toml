@@ -50,6 +50,15 @@ locker_private_key = "" # the locker private key to used used and the private ke
 # public_key - used for signature verification and encryption of response payload which is sent back to tenant
 hyperswitch = { master_key = "feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308", public_key = "", schema = "public", redis_key_prefix = "hyperswitch" }
 
+# Callers of a tenant. A tenant with no caller refuses every read, add and delete. Each caller
+# sends its own random key in the `x-vault-caller-key` header; only the key's lower-case hex
+# SHA-256 is configured here. `merchants` (v2: entity ids) and `rights` (`read`, `add`, `delete`;
+# absent: `read`) are comma-separated, with no spaces.
+# [tenant_secrets.hyperswitch.callers.reporting]
+# key_hash = "<sha-256 of the caller key, lower-case hex>"
+# merchants = "merchant_1,merchant_2"
+# rights = "read"
+
 # To protect secret/sensitive values like:
 # - database.passwod
 # - secrets.master_key

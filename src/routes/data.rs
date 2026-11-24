@@ -15,8 +15,8 @@ use crate::{
     audit,
     crypto::{hash_manager::managers::sha::CardDedupHmac, keymanager},
     custom_extractors::{
-        AuditRequestId, OptionalCallerKey, OptionalFingerprintId, TenantStateResolver,
-        authorize_read,
+        AuditRequestId, CallerRight, OptionalCallerKey, OptionalFingerprintId, TenantStateResolver,
+        authorize_caller,
     },
     domain::{fingerprint, hash},
     error::{self, ContainerError, ResultContainerExt},
@@ -95,10 +95,11 @@ pub fn serve(
 pub async fn add_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Json(request): Json<types::StoreCardRequest>,
 ) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
     let pending = audit::store_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = add_card_inner(Arc::clone(&tenant_app_state), request).await;
+    let result = add_card_inner(Arc::clone(&tenant_app_state), caller_key, request).await;
     let pending = match &result {
         Ok(Json(types::StoreCardResponse {
             payload: Some(payload),
@@ -111,8 +112,16 @@ pub async fn add_card(
 
 async fn add_card_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     request: types::StoreCardRequest,
 ) -> Result<Json<types::StoreCardResponse>, ContainerError<error::ApiError>> {
+    authorize_caller(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.merchant_id,
+        CallerRight::Add,
+    )?;
+
     request.validate()?;
 
     // Keyed duplicate-check hash: HMAC-SHA512 under a key derived from the tenant master key and
@@ -202,18 +211,27 @@ async fn add_card_inner(
 pub async fn delete_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Json(request): Json<types::DeleteCardRequest>,
 ) -> Result<Json<types::DeleteCardResponse>, ContainerError<error::ApiError>> {
     let pending =
         audit::delete_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = delete_card_inner(Arc::clone(&tenant_app_state), request).await;
+    let result = delete_card_inner(Arc::clone(&tenant_app_state), caller_key, request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
 
 async fn delete_card_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     request: types::DeleteCardRequest,
 ) -> Result<Json<types::DeleteCardResponse>, ContainerError<error::ApiError>> {
+    authorize_caller(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.merchant_id,
+        CallerRight::Delete,
+    )?;
+
     let _entity = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.merchant_id.clone())
         .await?;
@@ -254,10 +272,11 @@ async fn retrieve_card_inner(
     caller_key: Option<Secret<String>>,
     request: types::RetrieveCardRequest,
 ) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
-    authorize_read(
+    authorize_caller(
         &tenant_app_state.config.tenant_secrets.callers,
         caller_key.as_ref(),
         &request.merchant_id,
+        CallerRight::Read,
     )?;
 
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)

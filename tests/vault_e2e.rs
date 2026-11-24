@@ -281,7 +281,17 @@ struct Vault {
     base: String,
     client: reqwest::Client,
     log: std::path::PathBuf,
+    /// The key `post` sends in `x-vault-caller-key`: the harness caller's, when it is declared.
+    caller_key: Option<String>,
 }
+
+/// Every merchant and entity id the tests of this file use through `post`.
+const HARNESS_MERCHANTS: &str = "demo-merchant,demo-merchant-2,demo-merchant-3,merchant-no-card,legacy-merchant,no-such-merchant";
+
+/// The test harness's own caller, `harness`: a random key (never printed) and its SHA-256, with
+/// every right for `HARNESS_MERCHANTS`. Every tenant must declare callers (T37, decision D-A), so
+/// the vault is started with this caller beside any caller a test declares.
+static HARNESS_CALLER: std::sync::LazyLock<(String, String)> = std::sync::LazyLock::new(caller_key);
 
 /// Replaces runs of 32 or more hex characters (key-shaped values) before a log line is printed.
 fn redact_hex(line: &str) -> String {
@@ -309,8 +319,38 @@ impl Vault {
         Self::start_with_env(db, master_key, &[]).await
     }
 
-    /// Starts the vault with `extra` environment variables added (the external key manager test).
+    /// Starts the vault with `extra` environment variables added, and the harness caller.
     async fn start_with_env(db: &TestDb, master_key: &str, extra: &[(&str, &str)]) -> Self {
+        let (key, key_hash) = &*HARNESS_CALLER;
+        let mut env = vec![
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__HARNESS__KEY_HASH",
+                key_hash.as_str(),
+            ),
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__HARNESS__MERCHANTS",
+                HARNESS_MERCHANTS,
+            ),
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__HARNESS__RIGHTS",
+                "read,add,delete",
+            ),
+        ];
+        env.extend_from_slice(extra);
+        Self::start_inner(db, master_key, &env, Some(key.clone())).await
+    }
+
+    /// Starts the vault with no caller declared for the tenant (decision D-A).
+    async fn start_without_callers(db: &TestDb, master_key: &str) -> Self {
+        Self::start_inner(db, master_key, &[], None).await
+    }
+
+    async fn start_inner(
+        db: &TestDb,
+        master_key: &str,
+        extra: &[(&str, &str)],
+        caller_key: Option<String>,
+    ) -> Self {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .expect("bind a free port")
             .local_addr()
@@ -342,6 +382,7 @@ impl Vault {
             base: format!("http://127.0.0.1:{port}"),
             client: reqwest::Client::new(),
             log,
+            caller_key,
         };
 
         for _ in 0..240 {
@@ -359,17 +400,10 @@ impl Vault {
         panic!("locker did not become healthy within 60 s");
     }
 
+    /// Posts `body` with the harness caller's key, when the vault declares that caller.
     async fn post(&self, path: &str, body: serde_json::Value) -> (u16, String) {
-        let response = self
-            .client
-            .post(format!("{}{path}", self.base))
-            .header("x-tenant-id", "public")
-            .json(&body)
-            .send()
-            .await
-            .expect("send request");
-        let status = response.status().as_u16();
-        (status, response.text().await.expect("response body"))
+        let key = self.caller_key.clone();
+        self.post_with_key(path, body, key.as_deref()).await
     }
 }
 
@@ -2822,4 +2856,697 @@ async fn caller_reads_only_its_entities_through_v2() {
         "the audit rows of the v2 reads differ from the expected outcomes"
     );
     assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+// Per-caller write control (T37), see
+// `docs/superpowers/specs/2026-11-24-per-caller-write-control-design.md`. Same rules as above: keys
+// generated here and never printed, no response body in an assertion message.
+
+/// One caller declared by a test: its name, the SHA-256 of its key, its merchants and, if given,
+/// its rights (absent: the default, `read`).
+type CallerSpec<'a> = (&'a str, &'a str, &'a str, Option<&'a str>);
+
+/// Starts the vault with `callers` (beside the harness caller) and unlocks it.
+async fn start_with_callers(db: &TestDb, keys: &Keys, callers: &[CallerSpec<'_>]) -> Vault {
+    let mut names = Vec::new();
+    for (name, key_hash, merchants, rights) in callers {
+        let prefix = format!(
+            "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__{}__",
+            name.to_uppercase()
+        );
+        names.push((format!("{prefix}KEY_HASH"), key_hash.to_string()));
+        names.push((format!("{prefix}MERCHANTS"), merchants.to_string()));
+        if let Some(rights) = rights {
+            names.push((format!("{prefix}RIGHTS"), rights.to_string()));
+        }
+    }
+    let env: Vec<(&str, &str)> = names
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let vault = Vault::start_with_env(db, &keys.master_key, &env).await;
+    unlock(&vault, keys).await;
+    vault
+}
+
+/// Rows of `locker`, `hash_table`, `vault` and `merchant`, each with an MD5 of its whole content,
+/// so that a refusal that changes a row without adding or removing one is seen too.
+fn row_counts(db: &TestDb) -> [(i64, String); 4] {
+    ["locker", "hash_table", "vault", "merchant"].map(|table| {
+        let digest = diesel::sql_query(format!(
+            "SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) AS text FROM {table} t"
+        ))
+        .get_result::<TextRow>(&mut db.connection())
+        .expect("table digest")
+        .text;
+        (db.count(table), digest)
+    })
+}
+
+/// Number of audit rows of `operation` with a failure and `code`.
+fn refusals_in_audit(db: &TestDb, operation: &str, code: i16) -> usize {
+    audit_of(db, operation)
+        .iter()
+        .filter(|(_, outcome, status)| outcome == "failure" && *status == code)
+        .count()
+}
+
+fn add_body(merchant: &str, number: &str, reference: &str) -> serde_json::Value {
+    serde_json::json!({
+        "merchant_id": merchant,
+        "merchant_customer_id": CUSTOMER,
+        "requestor_card_reference": reference,
+        "card": { "card_number": number }
+    })
+}
+
+fn delete_body(merchant: &str, reference: &str) -> serde_json::Value {
+    serde_json::json!({
+        "merchant_id": merchant,
+        "merchant_customer_id": CUSTOMER,
+        "card_reference": reference
+    })
+}
+
+fn v2_add_body(entity: &str, vault_id: &str, number: &str) -> serde_json::Value {
+    serde_json::json!({
+        "entity_id": entity,
+        "vault_id": vault_id,
+        "data": { "card_number": number },
+        "ttl": null
+    })
+}
+
+fn v2_ref_body(entity: &str, vault_id: &str) -> serde_json::Value {
+    serde_json::json!({ "entity_id": entity, "vault_id": vault_id })
+}
+
+/// Sends a request that must be refused with `status` and `message`, and checks that no row of
+/// `locker`, `hash_table`, `vault` or `merchant` was written or deleted.
+async fn assert_refused_without_change(
+    vault: &Vault,
+    db: &TestDb,
+    path: &str,
+    body: serde_json::Value,
+    key: Option<&str>,
+    expected: (u16, &str),
+    what: &str,
+) {
+    let before = row_counts(db);
+    let (status, response) = vault.post_with_key(path, body, key).await;
+    assert_refusal(status, &response, expected.0, expected.1, what);
+    assert_eq!(row_counts(db), before, "{what}: row counts changed");
+}
+
+fn last_audit(db: &TestDb, operation: &str) -> Option<(String, String, i16)> {
+    audit_of(db, operation).pop()
+}
+
+fn audit(operation: &str, outcome: &str, code: i16) -> Option<(String, String, i16)> {
+    Some((operation.to_string(), outcome.to_string(), code))
+}
+
+#[tokio::test]
+async fn caller_adds_only_for_its_merchants() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (writer, writer_hash) = caller_key();
+    let (_other, other_hash) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[
+            ("writer", &writer_hash, MERCHANT, Some("add")),
+            ("other", &other_hash, MERCHANT_2, Some("read,add,delete")),
+        ],
+    )
+    .await;
+
+    let (status, _) = vault
+        .post_with_key(
+            "/data/add",
+            add_body(MERCHANT, CARD_NUMBER, "own"),
+            Some(&writer),
+        )
+        .await;
+    assert_eq!(status, 200, "the caller adds for its own merchant");
+
+    for path in ["/data/add", "/cards/add"] {
+        let logged = refusals_in_audit(&db, "locker_add", 403);
+        assert_refused_without_change(
+            &vault,
+            &db,
+            path,
+            add_body(MERCHANT_2, CARD_2, "intruder"),
+            Some(&writer),
+            (403, NOT_ALLOWED),
+            path,
+        )
+        .await;
+        assert_eq!(
+            refusals_in_audit(&db, "locker_add", 403),
+            logged + 1,
+            "{path}: the refused add has no 403 audit row of its own"
+        );
+    }
+
+    // A merchant that never existed, with a card number that fails validation: the refusal comes
+    // before validation and before the merchant row and its key would be created.
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/data/add",
+        add_body("never-created-merchant", "4111111111111112", "invalid"),
+        Some(&writer),
+        (403, NOT_ALLOWED),
+        "invalid add for an unknown merchant",
+    )
+    .await;
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+#[tokio::test]
+async fn caller_deletes_only_its_merchants_cards() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (writer, writer_hash) = caller_key();
+    let (other, other_hash) = caller_key();
+    let (owner, owner_hash) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[
+            ("writer", &writer_hash, MERCHANT, Some("delete")),
+            ("other", &other_hash, MERCHANT_2, Some("read,add,delete")),
+            ("owner", &owner_hash, MERCHANT, Some("read,add,delete")),
+        ],
+    )
+    .await;
+    let (status, _) = vault
+        .post_with_key(
+            "/data/add",
+            add_body(MERCHANT_2, CARD_2, "theirs"),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 200, "the other caller stores its card");
+    let (status, _) = vault
+        .post_with_key(
+            "/data/add",
+            add_body(MERCHANT, CARD_NUMBER, "mine"),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "the owner stores a card for the writer's merchant"
+    );
+
+    for path in ["/data/delete", "/cards/delete"] {
+        let logged = refusals_in_audit(&db, "locker_delete", 403);
+        assert_refused_without_change(
+            &vault,
+            &db,
+            path,
+            delete_body(MERCHANT_2, "theirs"),
+            Some(&writer),
+            (403, NOT_ALLOWED),
+            path,
+        )
+        .await;
+        assert_eq!(
+            refusals_in_audit(&db, "locker_delete", 403),
+            logged + 1,
+            "{path}: the refused delete has no 403 audit row of its own"
+        );
+    }
+    let (status, body) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT_2, "theirs"),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 200, "the other merchant's card is still there");
+    assert_card_number(&body, CARD_2, "theirs");
+
+    // A reference that does not exist, and a merchant that never existed: the same refusal.
+    for (merchant, what) in [
+        (MERCHANT_2, "missing card of another merchant"),
+        ("never-created-merchant", "unknown merchant"),
+    ] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/data/delete",
+            delete_body(merchant, "no-such-card"),
+            Some(&writer),
+            (403, NOT_ALLOWED),
+            what,
+        )
+        .await;
+    }
+
+    let (status, _) = vault
+        .post_with_key("/data/delete", delete_body(MERCHANT, "mine"), Some(&writer))
+        .await;
+    assert_eq!(status, 200, "the caller deletes its own merchant's card");
+    let (status, _) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT, "mine"),
+            Some(&owner),
+        )
+        .await;
+    assert_eq!(status, 404, "the deleted card is gone");
+}
+
+#[tokio::test]
+async fn caller_without_a_valid_key_cannot_add_or_delete() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (_writer, writer_hash) = caller_key();
+    let (unknown, _) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[("writer", &writer_hash, MERCHANT, Some("read,add,delete"))],
+    )
+    .await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "own-card").await;
+
+    for (key, what) in [(None, "no key"), (Some(unknown.as_str()), "unknown key")] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/data/add",
+            add_body(MERCHANT, CARD_2, "new"),
+            key,
+            (401, KEY_REFUSED),
+            &format!("add, {what}"),
+        )
+        .await;
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/data/delete",
+            delete_body(MERCHANT, "own-card"),
+            key,
+            (401, KEY_REFUSED),
+            &format!("delete, {what}"),
+        )
+        .await;
+    }
+    let refused = |op: &str| (op.to_string(), "failure".to_string(), 401_i16);
+    assert!(
+        audit_of(&db, "locker_delete") == vec![refused("locker_delete"), refused("locker_delete")],
+        "the audit rows of the refused deletes differ from two 401 failures"
+    );
+    assert!(
+        audit_of(&db, "locker_add").ends_with(&[refused("locker_add"), refused("locker_add")]),
+        "the audit rows of the refused adds differ from two 401 failures"
+    );
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+#[tokio::test]
+async fn caller_adds_and_deletes_only_its_entities_through_v2() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (writer, writer_hash) = caller_key();
+    let (other, other_hash) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[
+            ("writer", &writer_hash, MERCHANT, Some("read,add,delete")),
+            ("other", &other_hash, MERCHANT_2, Some("read,add,delete")),
+        ],
+    )
+    .await;
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "mine", CARD_NUMBER),
+            Some(&writer),
+        )
+        .await;
+    assert_eq!(status, 200, "v2 add for the caller's own entity");
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT_2, "theirs", CARD_2),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 200, "v2 add by the other caller");
+
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/api/v2/vault/add",
+        v2_add_body(MERCHANT_2, "intruder", CARD_NUMBER),
+        Some(&writer),
+        (403, NOT_ALLOWED),
+        "v2 add for another entity",
+    )
+    .await;
+    assert!(
+        last_audit(&db, "vault_add") == audit("vault_add", "failure", 403),
+        "the refused v2 add has no 403 audit row"
+    );
+    // Overwriting the other entity's existing entry is an add too.
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/api/v2/vault/add?mode=upsert",
+        v2_add_body(MERCHANT_2, "theirs", CARD_NUMBER),
+        Some(&writer),
+        (403, NOT_ALLOWED),
+        "v2 upsert over another entity's entry",
+    )
+    .await;
+    // An entity that never existed, with an expired ttl that fails validation.
+    let mut invalid = v2_add_body("never-created-merchant", "invalid", CARD_NUMBER);
+    invalid["ttl"] = serde_json::json!(0);
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/api/v2/vault/add",
+        invalid,
+        Some(&writer),
+        (403, NOT_ALLOWED),
+        "invalid v2 add for an unknown entity",
+    )
+    .await;
+
+    for (entity, vault_id, what) in [
+        (MERCHANT_2, "theirs", "v2 delete of another entity's entry"),
+        (MERCHANT_2, "no-such-entry", "v2 delete of a missing entry"),
+        (
+            "never-created-merchant",
+            "no-such-entry",
+            "v2 delete for an unknown entity",
+        ),
+    ] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/api/v2/vault/delete",
+            v2_ref_body(entity, vault_id),
+            Some(&writer),
+            (403, NOT_ALLOWED),
+            what,
+        )
+        .await;
+    }
+    assert!(
+        last_audit(&db, "vault_delete") == audit("vault_delete", "failure", 403),
+        "the refused v2 delete has no 403 audit row"
+    );
+
+    let (status, body) = vault
+        .post_with_key(
+            "/api/v2/vault/retrieve",
+            v2_ref_body(MERCHANT_2, "theirs"),
+            Some(&other),
+        )
+        .await;
+    assert_eq!(status, 200, "the other entity's entry is still there");
+    let parsed: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    assert!(
+        parsed["data"]["card_number"].as_str() == Some(CARD_2),
+        "the other entity's entry was overwritten"
+    );
+
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/delete",
+            v2_ref_body(MERCHANT, "mine"),
+            Some(&writer),
+        )
+        .await;
+    assert_eq!(status, 200, "v2 delete of the caller's own entry");
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+#[tokio::test]
+async fn caller_without_a_valid_key_cannot_add_or_delete_through_v2() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (writer, writer_hash) = caller_key();
+    let (unknown, _) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[("writer", &writer_hash, MERCHANT, Some("read,add,delete"))],
+    )
+    .await;
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "mine", CARD_NUMBER),
+            Some(&writer),
+        )
+        .await;
+    assert_eq!(status, 200, "v2 add with the caller's key");
+
+    for (key, what) in [(None, "no key"), (Some(unknown.as_str()), "unknown key")] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "new", CARD_2),
+            key,
+            (401, KEY_REFUSED),
+            &format!("v2 add, {what}"),
+        )
+        .await;
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/api/v2/vault/delete",
+            v2_ref_body(MERCHANT, "mine"),
+            key,
+            (401, KEY_REFUSED),
+            &format!("v2 delete, {what}"),
+        )
+        .await;
+    }
+    let refused = |op: &str| (op.to_string(), "failure".to_string(), 401_i16);
+    assert!(
+        audit_of(&db, "vault_delete") == vec![refused("vault_delete"), refused("vault_delete")],
+        "the audit rows of the refused v2 deletes differ from two 401 failures"
+    );
+    assert!(
+        audit_of(&db, "vault_add").ends_with(&[refused("vault_add"), refused("vault_add")]),
+        "the audit rows of the refused v2 adds differ from two 401 failures"
+    );
+}
+
+#[tokio::test]
+async fn caller_needs_the_right_for_each_operation() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (reader, reader_hash) = caller_key();
+    let (adder, adder_hash) = caller_key();
+    let (deleter, deleter_hash) = caller_key();
+    let vault = start_with_callers(
+        &db,
+        &keys,
+        &[
+            ("reader", &reader_hash, MERCHANT, None),
+            ("adder", &adder_hash, MERCHANT, Some("add")),
+            ("deleter", &deleter_hash, MERCHANT, Some("delete")),
+        ],
+    )
+    .await;
+    let refused = (403, NOT_ALLOWED);
+
+    // v1: the adder stores, the reader reads, the deleter deletes; every other pair is refused.
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/data/add",
+        add_body(MERCHANT, CARD_NUMBER, "c1"),
+        Some(&reader),
+        refused,
+        "reader adds",
+    )
+    .await;
+    assert!(
+        last_audit(&db, "locker_add") == audit("locker_add", "failure", 403),
+        "the refused add of the reader has no 403 audit row"
+    );
+    assert_refused_without_change(
+        &vault,
+        &db,
+        "/data/add",
+        add_body(MERCHANT, CARD_NUMBER, "c1"),
+        Some(&deleter),
+        refused,
+        "deleter adds",
+    )
+    .await;
+    let (status, _) = vault
+        .post_with_key(
+            "/data/add",
+            add_body(MERCHANT, CARD_NUMBER, "c1"),
+            Some(&adder),
+        )
+        .await;
+    assert_eq!(status, 200, "adder adds");
+    let (status, _) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT, "c1"),
+            Some(&reader),
+        )
+        .await;
+    assert_eq!(status, 200, "reader reads");
+    for (key, what) in [(&adder, "adder reads"), (&deleter, "deleter reads")] {
+        let (status, body) = vault
+            .post_with_key(
+                "/data/retrieve",
+                retrieve_request(MERCHANT, "c1"),
+                Some(key),
+            )
+            .await;
+        assert_refusal(status, &body, 403, NOT_ALLOWED, what);
+    }
+    for (key, what) in [(&reader, "reader deletes"), (&adder, "adder deletes")] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/data/delete",
+            delete_body(MERCHANT, "c1"),
+            Some(key),
+            refused,
+            what,
+        )
+        .await;
+    }
+    let (status, _) = vault
+        .post_with_key("/data/delete", delete_body(MERCHANT, "c1"), Some(&deleter))
+        .await;
+    assert_eq!(status, 200, "deleter deletes");
+
+    // v2: the same rights.
+    for (key, what) in [
+        (&reader, "reader adds through v2"),
+        (&deleter, "deleter adds through v2"),
+    ] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "e1", CARD_NUMBER),
+            Some(key),
+            refused,
+            what,
+        )
+        .await;
+    }
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "e1", CARD_NUMBER),
+            Some(&adder),
+        )
+        .await;
+    assert_eq!(status, 200, "adder adds through v2");
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/retrieve",
+            v2_ref_body(MERCHANT, "e1"),
+            Some(&reader),
+        )
+        .await;
+    assert_eq!(status, 200, "reader reads through v2");
+    for (key, what) in [
+        (&adder, "adder reads through v2"),
+        (&deleter, "deleter reads through v2"),
+    ] {
+        let (status, body) = vault
+            .post_with_key(
+                "/api/v2/vault/retrieve",
+                v2_ref_body(MERCHANT, "e1"),
+                Some(key),
+            )
+            .await;
+        assert_refusal(status, &body, 403, NOT_ALLOWED, what);
+    }
+    for (key, what) in [
+        (&reader, "reader deletes through v2"),
+        (&adder, "adder deletes through v2"),
+    ] {
+        assert_refused_without_change(
+            &vault,
+            &db,
+            "/api/v2/vault/delete",
+            v2_ref_body(MERCHANT, "e1"),
+            Some(key),
+            refused,
+            what,
+        )
+        .await;
+    }
+    let (status, _) = vault
+        .post_with_key(
+            "/api/v2/vault/delete",
+            v2_ref_body(MERCHANT, "e1"),
+            Some(&deleter),
+        )
+        .await;
+    assert_eq!(status, 200, "deleter deletes through v2");
+}
+
+#[tokio::test]
+async fn tenant_without_callers_refuses_every_data_call() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (key, _) = caller_key();
+    let vault = Vault::start_without_callers(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    let calls = [
+        ("/data/add", add_body(MERCHANT, CARD_NUMBER, "c1")),
+        ("/data/retrieve", retrieve_request(MERCHANT, "c1")),
+        ("/data/delete", delete_body(MERCHANT, "c1")),
+        (
+            "/api/v2/vault/add",
+            v2_add_body(MERCHANT, "e1", CARD_NUMBER),
+        ),
+        ("/api/v2/vault/retrieve", v2_ref_body(MERCHANT, "e1")),
+        ("/api/v2/vault/delete", v2_ref_body(MERCHANT, "e1")),
+    ];
+    for (path, body) in calls {
+        for (with_key, what) in [(None, "no key"), (Some(key.as_str()), "a key")] {
+            assert_refused_without_change(
+                &vault,
+                &db,
+                path,
+                body.clone(),
+                with_key,
+                (401, KEY_REFUSED),
+                &format!("{path}, {what}"),
+            )
+            .await;
+        }
+    }
+    assert!(
+        last_audit(&db, "locker_add") == audit("locker_add", "failure", 401),
+        "the refused add has no 401 audit row"
+    );
+    assert!(
+        last_audit(&db, "vault_delete") == audit("vault_delete", "failure", 401),
+        "the refused v2 delete has no 401 audit row"
+    );
 }

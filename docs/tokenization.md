@@ -62,24 +62,32 @@ describes it, in the [threat model table](./threat-model.md).
 ### `/data/retrieve` is de-tokenization
 
 - Given a `card_reference`, the vault finds the row and decrypts it
-  (`src/routes/data.rs:277`), then returns the card.
+  (`src/routes/data.rs:296`), then returns the card.
 - Access control in this code base is per tenant: every data call must carry a known `x-tenant-id`
   (`src/custom_extractors.rs:27-31`), and with the `middleware` feature every request body must be
   a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and responses are
   signed, then encrypted as a JWE (`src/middleware.rs:92-96`), unless the caller asks for a
   signed-only response on the fingerprint route, which is then readable (`src/middleware.rs:79-90`).
-- A tenant may also declare its callers: each has a random key, of which the configuration holds
-  only the SHA-256, and the list of merchants whose cards it may read (`src/config.rs:154-167`).
-  For such a tenant, a read needs the `x-vault-caller-key` header with a known key, and the
-  merchant of the request (the entity, on `/api/v2/vault/retrieve`) must be on that caller's list
-  (`src/custom_extractors.rs:144-175`). The check runs before any key or row is loaded
-  (`src/routes/data.rs:257-261`, `src/routes/routes_v2/data.rs:80-84`); a missing or unknown key
-  gets HTTP 401, a merchant not on the list HTTP 403. Tests (`tests/vault_e2e.rs`):
-  `caller_reads_only_its_merchants_cards`, `caller_without_a_valid_key_is_refused`,
-  `caller_reads_only_its_entities_through_v2`. A tenant that declares no caller keeps the
-  per-tenant rule alone, and add, delete and fingerprint are not limited per caller.
+- Every tenant declares its callers: each has a random key, of which the configuration holds only
+  the SHA-256, a list of merchants and the rights it has for them, among `read`, `add` and
+  `delete` (`read` only when the field is absent; an empty value grants nothing) (`src/config.rs:154-175`). A read, an add or a delete
+  needs the `x-vault-caller-key` header with a known key, the merchant of the request (the entity,
+  on the second API version) on that caller's list, and the matching right
+  (`src/custom_extractors.rs:139-195`). The check runs before any key or row is loaded or written,
+  on reads (`src/routes/data.rs:275-280`, `src/routes/routes_v2/data.rs:91-96`), adds
+  (`src/routes/data.rs:118-123`, `src/routes/routes_v2/data.rs:171-176`) and deletes
+  (`src/routes/data.rs:228-233`, `src/routes/routes_v2/data.rs:43-48`); a missing or unknown key,
+  or a tenant that declares no caller, gets HTTP 401, a merchant not on the list or a missing right
+  HTTP 403. Tests (`tests/vault_e2e.rs`): `caller_reads_only_its_merchants_cards`,
+  `caller_without_a_valid_key_is_refused`, `caller_reads_only_its_entities_through_v2`,
+  `caller_adds_only_for_its_merchants`, `caller_deletes_only_its_merchants_cards`,
+  `caller_without_a_valid_key_cannot_add_or_delete`,
+  `caller_adds_and_deletes_only_its_entities_through_v2`,
+  `caller_without_a_valid_key_cannot_add_or_delete_through_v2`,
+  `caller_needs_the_right_for_each_operation`, `tenant_without_callers_refuses_every_data_call`.
+  The fingerprint routes are not limited per caller.
 - Every de-tokenization leaves an audit row before the card leaves the vault, and none is returned if
-  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:249`),
+  that row cannot be written: `audit::record` is called on every retrieve (`src/routes/data.rs:267`),
   proven by `retrieve_fails_closed_when_audit_table_is_unwritable` (`tests/vault_e2e.rs`).
 - The row never holds the card: `store_card_entry_never_contains_card_number` (`src/audit.rs`) and
   the demo's check "audit rows containing the card number: 0".
@@ -98,7 +106,7 @@ describes it, in the [threat model table](./threat-model.md).
 ### The duplicate check uses a keyed hash, scoped to the merchant and customer
 
 - To detect a card already stored, `/data/add` computes a hash of the card number
-  (`src/routes/data.rs:118-129`) and looks it up in `hash_table.data_hash`
+  (`src/routes/data.rs:127-138`) and looks it up in `hash_table.data_hash`
   (`src/storage/schema.rs:51-55`). That hash is one HMAC-SHA512 from `ring`
   (`src/crypto/hash_manager/managers/sha.rs:142-145`), 64 bytes, not truncated.
 - Its key is derived with HKDF-SHA512 from the tenant master key, the context
@@ -271,9 +279,9 @@ describes it, in the [threat model table](./threat-model.md).
   then changes no row and the run stops). Two checks are not observable on their own, since another
   one gives the same result: the five-line check (a missing line does not unlock the key either)
   and the rotation's own batch size check (the re-hash step refuses a batch size below 1 too).
-- **No masking, and per-caller rules on reads only.** An allowed read returns the full card
-  number; add, delete and fingerprint are not limited per caller; a tenant that declares no caller
-  has no per-caller rule at all (a later phase of this fork may study them).
+- **No masking, and no per-caller rule on fingerprints.** An allowed read returns the full card
+  number; the fingerprint routes, `/entity` and `/key/transfer` are not limited per caller (a later
+  phase of this fork may study them).
 - **Custodian unlock before the database role is narrowed.** Since custodian steps are recorded in
   `audit_log`, the vault opens an audit connection before it is unlocked, with the same database
   credentials as the rest of the vault. It still cannot read any card before unlock, because every

@@ -151,19 +151,27 @@ pub struct TenantSecrets {
     #[cfg(feature = "redis")]
     pub redis_key_prefix: String,
 
-    /// Callers allowed to read cards, by name. Empty: any caller of the tenant reads any card.
+    /// Callers of the tenant, by name. Empty: every read, add and delete is refused.
     #[serde(default)]
     pub callers: HashMap<String, CallerConfig>,
 }
 
-/// One caller of a tenant and the merchants whose cards it may read.
+/// One caller of a tenant: its key, its merchants and what it may do for them.
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct CallerConfig {
     /// Lower-case hex SHA-256 of the caller's key. The key itself is never configured. Masked in
     /// `Debug`, so the start-up configuration dump does not print it.
     pub key_hash: Secret<String>,
-    /// Comma-separated merchant ids (v1) or entity ids (v2) this caller may read, with no spaces.
+    /// Comma-separated merchant ids (v1) or entity ids (v2) this caller may use, with no spaces.
     pub merchants: String,
+    /// Comma-separated rights among `read`, `add` and `delete`, with no spaces, for every merchant
+    /// of `merchants`. Absent: `read`. An unknown word grants nothing.
+    #[serde(default = "default_caller_rights")]
+    pub rights: String,
+}
+
+fn default_caller_rights() -> String {
+    "read".to_string()
 }
 
 fn deserialize_hex<'de, D>(deserializer: D) -> Result<Secret<Vec<u8>>, D::Error>
