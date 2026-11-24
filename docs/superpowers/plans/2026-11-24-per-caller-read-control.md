@@ -174,11 +174,13 @@ most a prefix of that hash, from which the key cannot be recovered. The key is h
 
 (filled during execution)
 
+Task 1 runs (2026-11-24): `src/` identical to `main` (`git diff main --stat -- src` empty), PostgreSQL 14 on port 54330; outputs scanned for card numbers and 64-character hex strings: 0 in each.
+
 | Run | Test | Failure line (assertion and values) |
 |---|---|---|
-| Task 1, before any `src/` change | `caller_reads_only_its_merchants_cards` | |
-| Task 1, before any `src/` change | `caller_without_a_valid_key_is_refused` | |
-| Task 1, before any `src/` change | `caller_reads_only_its_entities_through_v2` | |
+| Task 1, before any `src/` change | `caller_reads_only_its_merchants_cards` | `tests/vault_e2e.rs:2625` (`assert_refusal`): `assertion left == right failed: /data/retrieve: status`, left 200, right 403; the read of the caller's own card passed first. Same with and without `key_custodian` (3 run, 0 passed, 3 failed). |
+| Task 1, before any `src/` change | `caller_without_a_valid_key_is_refused` | `tests/vault_e2e.rs:2625`: `no key: status`, left 200, right 401; both modes. |
+| Task 1, before any `src/` change | `caller_reads_only_its_entities_through_v2` | `tests/vault_e2e.rs:2625`: `v2 other entity: status`, left 200, right 403; the two v2 adds and the allowed v2 read passed first; both modes. |
 | Task 4, check removed | `caller_reads_only_its_merchants_cards` | |
 | Task 4, check removed | `caller_without_a_valid_key_is_refused` | |
 | Task 4, check removed | `caller_reads_only_its_entities_through_v2` | |
