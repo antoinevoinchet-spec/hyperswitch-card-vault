@@ -68,10 +68,10 @@ describes it, in the [threat model table](./threat-model.md).
   a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and every response is
   signed (`src/middleware.rs:81`).
 - A tenant may also declare its callers: each has a random key, of which the configuration holds
-  only the SHA-256, and the list of merchants whose cards it may read (`src/config.rs:154-166`).
+  only the SHA-256, and the list of merchants whose cards it may read (`src/config.rs:154-167`).
   For such a tenant, a read needs the `x-vault-caller-key` header with a known key, and the
   merchant of the request (the entity, on `/api/v2/vault/retrieve`) must be on that caller's list
-  (`src/custom_extractors.rs:144-170`). The check runs before any key or row is loaded
+  (`src/custom_extractors.rs:144-175`). The check runs before any key or row is loaded
   (`src/routes/data.rs:257-261`, `src/routes/routes_v2/data.rs:80-84`); a missing or unknown key
   gets HTTP 401, a merchant not on the list HTTP 403. Tests (`tests/vault_e2e.rs`):
   `caller_reads_only_its_merchants_cards`, `caller_without_a_valid_key_is_refused`,

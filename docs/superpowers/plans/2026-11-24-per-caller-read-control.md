@@ -1,7 +1,7 @@
 # Per-caller read control (T19): plan
 
 Design: `docs/superpowers/specs/2026-11-24-per-caller-read-control-design.md` (decision R1: option
-A). Branch: `feat/per-caller-read-control`. Status: waiting for the owner's approval.
+A). Branch: `feat/per-caller-read-control`. Status: approved by the owner on 2026-11-24; executed on the branch (see the execution notes).
 
 ## Files this plan may change
 
@@ -182,7 +182,7 @@ Task 2 (read on 2026-11-24): the request span records only `x-tenant-id` and `x-
 
 | Run | Test | Failure line (assertion and values) |
 |---|---|---|
-| Task 1, before any `src/` change | `caller_reads_only_its_merchants_cards` | `tests/vault_e2e.rs:2625` (`assert_refusal`): `assertion left == right failed: /data/retrieve: status`, left 200, right 403; the read of the caller's own card passed first. Same with and without `key_custodian` (3 run, 0 passed, 3 failed). |
+| Task 1, before any `src/` change | `caller_reads_only_its_merchants_cards` | `tests/vault_e2e.rs:2625` (`assert_refusal`; the same `assert_eq!` is at `:2631` after `cargo fmt`, which is the line of the Task 4 runs): `assertion left == right failed: /data/retrieve: status`, left 200, right 403; the read of the caller's own card passed first. Same with and without `key_custodian` (3 run, 0 passed, 3 failed). |
 | Task 1, before any `src/` change | `caller_without_a_valid_key_is_refused` | `tests/vault_e2e.rs:2625`: `no key: status`, left 200, right 401; both modes. |
 | Task 1, before any `src/` change | `caller_reads_only_its_entities_through_v2` | `tests/vault_e2e.rs:2625`: `v2 other entity: status`, left 200, right 403; the two v2 adds and the allowed v2 read passed first; both modes. |
 | Task 4, check removed | `caller_reads_only_its_merchants_cards` | `authorize_read` made to return `Ok(())` always (not committed): `tests/vault_e2e.rs:2631`, `/data/retrieve: status`, left 200, right 403 (3 run, 0 passed, 3 failed, with `key_custodian`). |
@@ -190,3 +190,19 @@ Task 2 (read on 2026-11-24): the request span records only `x-tenant-id` and `x-
 | Task 4, check removed | `caller_reads_only_its_entities_through_v2` | `tests/vault_e2e.rs:2631`, `v2 other entity: status`, left 200, right 403. |
 | Task 2, stub before the check | unit tests of `authorize_read` | stub returning `Ok(())`, `cargo test -j 4 --lib --features key_custodian caller_tests`: 3 passed, 5 failed (`authorize_read_refuses_a_missing_key` at `src/custom_extractors.rs:190`, `authorize_read_refuses_an_unknown_key` at `:198`, `authorize_read_refuses_an_unlisted_merchant` at `:211`, `authorize_read_with_an_empty_list_refuses_every_merchant` at `:224`, `authorize_read_needs_the_exact_key_hash` at `:238`); the three that passed test allowed reads and the masked `Debug`. With the check: 8 passed, with and without `key_custodian`. |
 | Task 4, check removed | unit tests of `authorize_read` | 3 passed, 5 failed: the same five refusal tests as with the stub (`src/custom_extractors.rs:212`, `:220`, `:233`, `:246`, `:260`, lines moved by the implementation). Restored with `git checkout -- src/custom_extractors.rs`; the three e2e tests pass again (3 passed). |
+
+Reviews (2026-11-24):
+- `security-review`: no finding.
+- Second opinion (gpt-6.2-sol, through `second-avis`, 0.0435 USD): two remarks. Confirmed: two
+  callers sharing one key gave a decision that depended on the map's order. Rejected: "the tests
+  pass without a database"; every run set `VAULT_TEST_REQUIRE_DB=1`, which fails a test when the
+  database is missing (`tests/vault_e2e.rs:39-42`).
+- Fresh `opus` subagent: one important deviation, confirmed: `key_hash` was a plain `String` and the
+  start-up configuration dump (`src/app.rs:316`, level `DEBUG` in `config/development.toml`) would
+  print it; plus the two minor points fixed here (this status line, the line moved by `cargo fmt`)
+  and the shared key above. A list written with spaces (`m1, m2`) refuses the merchant after the
+  space: it fails closed and the field's comment now says "with no spaces".
+- Fix, test first: `authorize_read_with_two_callers_sharing_a_key_uses_both_lists` failed at
+  `src/custom_extractors.rs:278` and `caller_config_debug_hides_the_key_hash` at `:286` (8 passed,
+  2 failed); after the fix 10 passed with and without `key_custodian`; e2e 36 passed with
+  `key_custodian`, 32 without; `cargo test -j 4` 92 passed; `make demo` DEMO OK; clippy and fmt 0.
