@@ -261,4 +261,18 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 
 ## Execution notes
 
-(filled during execution)
+Task 1 (2026-11-24): local PostgreSQL 14 on port 54330 (throwaway, in the session scratchpad).
+Harness merchants read in the file: `demo-merchant`, `demo-merchant-2`, `demo-merchant-3`,
+`merchant-no-card`, `legacy-merchant`, `no-such-merchant`. Step 1, whole e2e file with the harness
+caller on the code of `main` (`key_custodian`): 36 passed, 0 failed. Outputs scanned for card
+numbers and 64-character hex strings: 0 in each.
+
+| Run | Test | Failure line (assertion and values) |
+|---|---|---|
+| Task 1, before any `src/` change, with and without `key_custodian` (7 run, 0 passed, 7 failed each) | `caller_adds_only_for_its_merchants` | `tests/vault_e2e.rs:2665` (`assert_refusal`): `/data/add: status`, left 200, right 403; the caller's own add passed first. |
+| same | `caller_deletes_only_its_merchants_cards` | `:2665`: `/data/delete: status`, left 200, right 403; the two adds passed first. |
+| same | `caller_without_a_valid_key_cannot_add_or_delete` | `:2665`: `add, no key: status`, left 200, right 401. |
+| same | `caller_adds_and_deletes_only_its_entities_through_v2` | `:2665`: `v2 add for another entity: status`, left 200, right 403; the two v2 adds passed first. |
+| same | `caller_without_a_valid_key_cannot_add_or_delete_through_v2` | `:2665`: `v2 add, no key: status`, left 200, right 401. |
+| same | `caller_needs_the_right_for_each_operation` | `:2665`: `reader adds: status`, left 200, right 403. |
+| same | `tenant_without_callers_refuses_every_data_call` | `:2665`: `/data/add, no key: status`, left 200, right 401. |
