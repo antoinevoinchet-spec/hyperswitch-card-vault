@@ -2418,3 +2418,148 @@ async fn rotation_with_external_key_manager() {
     let transferred: serde_json::Value = serde_json::from_str(&body).expect("transfer JSON");
     assert_eq!(transferred["total_transferred"], 1);
 }
+
+/// Threat T13, write side: each merchant's data key opens every card row of that merchant and no
+/// row of another merchant; the master key opens none. Failure messages name references and
+/// merchants only.
+#[tokio::test]
+async fn each_merchant_key_opens_only_its_own_cards() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    // CARD_NUMBER is held by two merchants; the other numbers by one merchant only.
+    let cards = [
+        (MERCHANT, "iso-m1-a", CARD_NUMBER),
+        (MERCHANT, "iso-m1-b", CARD_2),
+        (MERCHANT_2, "iso-m2-a", CARD_NUMBER),
+        (MERCHANT_3, "iso-m3-a", "4012888888881881"),
+    ];
+    for (merchant, reference, number) in cards {
+        store_card_with_ref(
+            &vault,
+            merchant,
+            CUSTOMER,
+            card_data_with(number),
+            reference,
+        )
+        .await;
+    }
+    drop(vault);
+
+    let master = unlocked_master_key(&keys);
+    let deks = merchant_keys(&db, &master);
+    let rows = locker_data(&db);
+
+    // D1: every stored card is there, under its own merchant.
+    assert_eq!(deks.len(), 3, "three merchant keys");
+    assert_eq!(rows.len(), cards.len(), "locker row count");
+    for merchant in [MERCHANT, MERCHANT_2, MERCHANT_3] {
+        let expected = cards.iter().filter(|card| card.0 == merchant).count();
+        let stored = rows
+            .iter()
+            .filter(|row| row.merchant_id == merchant)
+            .count();
+        assert_eq!(stored, expected, "{merchant} row count");
+    }
+
+    // D2: each merchant's key opens its own rows to the card number it stored.
+    for row in &rows {
+        let (_, _, number) = cards
+            .iter()
+            .find(|card| card.0 == row.merchant_id && card.1 == row.locker_id)
+            .expect("row stored by this test");
+        let plain = deks
+            .get(&row.merchant_id)
+            .and_then(|key| opens(key, &row.enc_data));
+        assert!(
+            plain.is_some_and(|plain| String::from_utf8_lossy(&plain).contains(number)),
+            "{} of {} does not open to its card under its own merchant key",
+            row.locker_id,
+            row.merchant_id
+        );
+    }
+
+    // D3: exactly one key opens each row, its own merchant's.
+    let mut openers: Vec<(&str, &[u8])> = deks
+        .iter()
+        .map(|(merchant, key)| (merchant.as_str(), key.as_slice()))
+        .collect();
+    openers.push(("master key", master.as_slice()));
+    let mut isolated = true;
+    let mut matrix = String::new();
+    for row in &rows {
+        let (open, refuse): (Vec<_>, Vec<_>) = openers
+            .iter()
+            .partition(|(_, key)| opens(key, &row.enc_data).is_some());
+        let open: Vec<&str> = open.iter().map(|(name, _)| *name).collect();
+        let refuse: Vec<&str> = refuse.iter().map(|(name, _)| *name).collect();
+        isolated &= open == [row.merchant_id.as_str()];
+        matrix.push_str(&format!(
+            "{} of {}: OPENS {open:?} REFUSES {refuse:?}\n",
+            row.locker_id, row.merchant_id
+        ));
+    }
+    assert!(
+        isolated,
+        "a card row opens under another key than its merchant's:\n{matrix}"
+    );
+}
+
+/// Threat T13, read side: a card row copied in the database from one merchant to another is not
+/// returned to the second merchant, because the vault decrypts with the requesting merchant's key.
+#[tokio::test]
+async fn card_moved_to_another_merchant_is_not_returned() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(
+        &vault,
+        MERCHANT,
+        CUSTOMER,
+        card_data_with(CARD_NUMBER),
+        "iso-a",
+    )
+    .await;
+    store_card_with_ref(
+        &vault,
+        MERCHANT_2,
+        CUSTOMER,
+        card_data_with(CARD_2),
+        "iso-b",
+    )
+    .await;
+
+    // Positive control: merchant 2 reads its own card through the same route.
+    let (status, body) = vault
+        .post("/data/retrieve", retrieve_request(MERCHANT_2, "iso-b"))
+        .await;
+    assert_eq!(status, 200, "merchant 2 reads its own card");
+    assert_card_number(&body, CARD_2, "iso-b");
+
+    // Copy merchant 1's row under merchant 2, unchanged except merchant and reference.
+    db.exec(&format!(
+        "INSERT INTO locker \
+         (locker_id, merchant_id, customer_id, enc_data, hash_id, created_at, ttl, updated_by) \
+         SELECT 'iso-moved', '{MERCHANT_2}', customer_id, enc_data, hash_id, created_at, ttl, \
+         updated_by FROM locker WHERE merchant_id = '{MERCHANT}' AND locker_id = 'iso-a'"
+    ));
+    assert_eq!(db.count("locker"), 3, "row copied");
+
+    let (status, body) = vault
+        .post("/data/retrieve", retrieve_request(MERCHANT_2, "iso-moved"))
+        .await;
+    let refused = !(200..300).contains(&status);
+    let leaked = [CARD_NUMBER, CARD_2]
+        .iter()
+        .any(|number| body.contains(number));
+    assert!(
+        refused && !leaked,
+        "a card copied from {MERCHANT} is served to {MERCHANT_2} \
+         (status {status}, refused {refused}, card number in body {leaked})"
+    );
+    assert_no_secret(&body, &[CARD_NUMBER.to_string(), CARD_2.to_string()]);
+}
