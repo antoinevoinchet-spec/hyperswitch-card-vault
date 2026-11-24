@@ -105,6 +105,17 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/tokenization.md`: with the `middleware` feature, responses are described as JWE-encrypted, signed, then encrypted, or signed only when the caller asks for it on the fingerprint route, instead of only signed.
   - `docs/threat-model.md`: T20 cites the custodian unlock passage, a stray mark removed from T21, moved line references; new open rows T37 (any caller of a tenant can add or delete cards of any of its merchants) and T38 (a card ciphertext is not bound to its row), referenced from T19 and T13.
   - `README.md`: this entry.
+- Per-caller write control (every tenant must declare its callers; each caller has rights among `read`, `add` and `delete`, `read` only by default, for the merchants on its list; reads, adds and deletes are refused with HTTP 401 or 403 before any key or row is loaded or written):
+  - `src/config.rs`: new `rights` field of a caller, `read` when absent.
+  - `src/custom_extractors.rs`: `authorize_read` replaced by `authorize_caller`, which takes the right asked for and refuses every call of a tenant with no caller, with unit tests.
+  - `src/routes/data.rs` and `src/routes/routes_v2/data.rs`: the add and delete routes run the check first, like the retrieve routes.
+  - `tests/vault_e2e.rs`: the test vault declares its own caller; new tests `caller_adds_only_for_its_merchants`, `caller_deletes_only_its_merchants_cards`, `caller_without_a_valid_key_cannot_add_or_delete`, `caller_adds_and_deletes_only_its_entities_through_v2`, `caller_without_a_valid_key_cannot_add_or_delete_through_v2`, `caller_needs_the_right_for_each_operation` and `tenant_without_callers_refuses_every_data_call`.
+  - `demo/run.sh` and `demo/README.md`: the demo generates a caller key at each run, gives the vault only its SHA-256 and sends the key with every request.
+  - `config/config.example.toml`: a commented example of a tenant's callers.
+  - `docs/threat-model.md`: T37 proven, with what the control does not cover; T19 updated (mandatory callers, the `read` right); T37 added to the rows cited by end-to-end tests; moved line references.
+  - `docs/tokenization.md`: describes the per-caller rights on reads, adds and deletes and what they leave open; moved line references.
+  - `docs/superpowers/specs/2026-11-24-per-caller-write-control-design.md` and `docs/superpowers/plans/2026-11-24-per-caller-write-control.md`: design and implementation plan, with the breakage runs.
+  - `README.md`: this entry.
 
 ## Demo
 
