@@ -268,3 +268,26 @@ hex runs (patterns in the scratchpad, nothing printed); only outputs with a coun
 ## Verification summary
 Both new tests green; each seen red on the breakage that reaches its assertion; `E2E` 33 passed;
 unit tests ≥ 77; demo OK; check script 0; CI green on the PR.
+
+## Execution notes (2026-11-24, UTC)
+
+- Baseline before the tests: e2e suite with `key_custodian`, `31 passed; 0 failed`.
+- Both new tests green on unchanged `src/`. The refusal status of the copied row is 400.
+- Breakage 1 (`src/domain/merchant.rs`, every merchant key set to the same 32 bytes): both tests
+  compile and fail at their targeted assertion.
+  - `each_merchant_key_opens_only_its_own_cards` panics at `tests/vault_e2e.rs:2504` (the
+    one-opener assertion, after the counts and the own-key checks passed): every row
+    `OPENS ["demo-merchant", "demo-merchant-2", "demo-merchant-3"] REFUSES ["master key"]`.
+  - `card_moved_to_another_merchant_is_not_returned` panics at `tests/vault_e2e.rs:2559`: "a card
+    copied from demo-merchant is served to demo-merchant-2 (status 200, refused false, card number
+    in body true)".
+- Breakage 2 (`src/crypto/keymanager/internal_keymanager.rs`, card data encrypted with the master
+  key instead of the merchant key):
+  - `each_merchant_key_opens_only_its_own_cards` panics at `tests/vault_e2e.rs:2476`: "iso-m1-a of
+    demo-merchant does not open to its card under its own merchant key".
+  - `card_moved_to_another_merchant_is_not_returned` panics at `tests/vault_e2e.rs:2540`, its
+    positive control ("merchant 2 reads its own card"); this shows the control is live and does not
+    count for the refusal.
+- Both breakages undone with `git checkout`; `git diff main -- src` empty; both tests green again.
+- Every saved output (green and both breakages) scanned for the three card numbers and for
+  64-character hex runs: 0 matches.
