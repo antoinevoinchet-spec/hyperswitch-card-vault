@@ -154,15 +154,20 @@ pub fn authorize_read(
         &ring::digest::SHA256,
         key.peek().as_bytes(),
     ));
-    let caller = callers
+    // Every caller with this key counts, so two entries sharing a key do not depend on map order.
+    let mut matching = callers
         .values()
-        .find(|caller| caller.key_hash == key_hash)
-        .ok_or(ApiError::CallerKeyMissingOrUnknown)?;
-    if caller
-        .merchants
-        .split(',')
-        .any(|allowed| !allowed.is_empty() && allowed == merchant_id)
-    {
+        .filter(|caller| *caller.key_hash.peek() == key_hash)
+        .peekable();
+    if matching.peek().is_none() {
+        return Err(ApiError::CallerKeyMissingOrUnknown);
+    }
+    if matching.any(|caller| {
+        caller
+            .merchants
+            .split(',')
+            .any(|allowed| !allowed.is_empty() && allowed == merchant_id)
+    }) {
         Ok(())
     } else {
         Err(ApiError::CallerNotAllowed)
@@ -192,7 +197,7 @@ mod caller_tests {
         HashMap::from([(
             "reader".to_string(),
             CallerConfig {
-                key_hash: sha256_hex(KEY),
+                key_hash: sha256_hex(KEY).into(),
                 merchants: merchants.to_string(),
             },
         )])
@@ -256,11 +261,34 @@ mod caller_tests {
     #[test]
     fn authorize_read_needs_the_exact_key_hash() {
         let mut upper = callers("m1");
-        upper.get_mut("reader").unwrap().key_hash = sha256_hex(KEY).to_uppercase();
+        upper.get_mut("reader").unwrap().key_hash = sha256_hex(KEY).to_uppercase().into();
         assert!(matches!(
             authorize_read(&upper, Some(&key(KEY)), "m1"),
             Err(ApiError::CallerKeyMissingOrUnknown)
         ));
+    }
+
+    #[test]
+    fn authorize_read_with_two_callers_sharing_a_key_uses_both_lists() {
+        let mut two = callers("m1");
+        two.insert(
+            "second".to_string(),
+            CallerConfig {
+                key_hash: sha256_hex(KEY).into(),
+                merchants: "m2".to_string(),
+            },
+        );
+        // Whatever order the map yields, each listed merchant is allowed.
+        for _ in 0..20 {
+            assert!(authorize_read(&two, Some(&key(KEY)), "m1").is_ok());
+            assert!(authorize_read(&two, Some(&key(KEY)), "m2").is_ok());
+        }
+    }
+
+    #[test]
+    fn caller_config_debug_hides_the_key_hash() {
+        let printed = format!("{:?}", callers("m1"));
+        assert!(!printed.contains(&sha256_hex(KEY)));
     }
 
     #[test]

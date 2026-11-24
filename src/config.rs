@@ -159,9 +159,10 @@ pub struct TenantSecrets {
 /// One caller of a tenant and the merchants whose cards it may read.
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct CallerConfig {
-    /// Lower-case hex SHA-256 of the caller's key. The key itself is never configured.
-    pub key_hash: String,
-    /// Comma-separated merchant ids (v1) or entity ids (v2) this caller may read.
+    /// Lower-case hex SHA-256 of the caller's key. The key itself is never configured. Masked in
+    /// `Debug`, so the start-up configuration dump does not print it.
+    pub key_hash: Secret<String>,
+    /// Comma-separated merchant ids (v1) or entity ids (v2) this caller may read, with no spaces.
     pub merchants: String,
 }
 
