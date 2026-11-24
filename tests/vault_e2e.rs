@@ -3807,3 +3807,264 @@ async fn fingerprint_differs_for_two_caller_keys() {
     assert_eq!(body["fingerprints"]["b"], b.as_str(), "batch, key b");
     assert_eq!(db.count("fingerprint"), 3, "no new row");
 }
+
+// T16: the JWE middleware. Run with `--features key_custodian,middleware` and filtered on
+// `middleware_`: under that feature, every other test of this file sends plain JSON and is refused.
+// The client below uses `josekit` directly, not the vault's own `JWEncryption`.
+
+/// Two RSA 2048 key pairs made for one test, as PEM: the locker's and the tenant's. Never printed.
+#[cfg(feature = "middleware")]
+struct JweKeys {
+    locker_private: String,
+    locker_public: String,
+    tenant_private: String,
+    tenant_public: String,
+}
+
+#[cfg(feature = "middleware")]
+fn rsa_pair() -> (String, String) {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("RSA key");
+    let public = rsa::RsaPublicKey::from(&private);
+    (
+        private
+            .to_pkcs8_pem(Default::default())
+            .expect("private PEM")
+            .to_string(),
+        public
+            .to_public_key_pem(Default::default())
+            .expect("public PEM"),
+    )
+}
+
+#[cfg(feature = "middleware")]
+impl JweKeys {
+    fn generate() -> Self {
+        let (locker_private, locker_public) = rsa_pair();
+        let (tenant_private, tenant_public) = rsa_pair();
+        Self {
+            locker_private,
+            locker_public,
+            tenant_private,
+            tenant_public,
+        }
+    }
+
+    /// What a tenant application sends: `payload` signed with `signing_key` (RS256), wrapped as
+    /// JSON and encrypted to the locker key with `alg` and A256GCM, as the `JweBody` fields.
+    fn request(
+        &self,
+        payload: &serde_json::Value,
+        signing_key: &str,
+        alg: &josekit::jwe::alg::rsaes::RsaesJweAlgorithm,
+    ) -> serde_json::Value {
+        let signer = josekit::jws::RS256
+            .signer_from_pem(signing_key.as_bytes())
+            .expect("signer");
+        let jws = josekit::jws::serialize_compact(
+            payload.to_string().as_bytes(),
+            &josekit::jws::JwsHeader::new(),
+            &signer,
+        )
+        .expect("sign request");
+        let mut parts = jws.split('.');
+        let jws_body = serde_json::json!({
+            "header": parts.next().expect("JWS header"),
+            "payload": parts.next().expect("JWS payload"),
+            "signature": parts.next().expect("JWS signature"),
+        });
+        let encrypter = alg
+            .encrypter_from_pem(self.locker_public.as_bytes())
+            .expect("encrypter");
+        let mut header = josekit::jwe::JweHeader::new();
+        header.set_content_encryption("A256GCM");
+        let jwe = josekit::jwe::serialize_compact(
+            jws_body.to_string().as_bytes(),
+            &header,
+            &encrypter,
+        )
+        .expect("encrypt request");
+        let parts: Vec<&str> = jwe.split('.').collect();
+        assert_eq!(parts.len(), 5, "compact JWE");
+        serde_json::json!({
+            "header": parts[0],
+            "encryptedKey": parts[1],
+            "iv": parts[2],
+            "encryptedPayload": parts[3],
+            "tag": parts[4],
+        })
+    }
+
+    /// The payload of a JWE response: decrypted with the tenant key (RSA-OAEP), then its inner JWS
+    /// verified with the locker key. Fails if the body is not such an envelope.
+    fn open_response(&self, body: &str) -> serde_json::Value {
+        let envelope: serde_json::Value = serde_json::from_str(body).expect("response JSON");
+        let field = |name: &str| envelope[name].as_str().expect("JWE field").to_string();
+        let compact = [
+            field("header"),
+            field("encryptedKey"),
+            field("iv"),
+            field("encryptedPayload"),
+            field("tag"),
+        ]
+        .join(".");
+        let decrypter = josekit::jwe::RSA_OAEP
+            .decrypter_from_pem(self.tenant_private.as_bytes())
+            .expect("decrypter");
+        let (jws_json, _) =
+            josekit::jwe::deserialize_compact(&compact, &decrypter).expect("decrypt response");
+        let jws: serde_json::Value = serde_json::from_slice(&jws_json).expect("inner JWS JSON");
+        self.verify_jws(&jws)
+    }
+
+    /// The payload of a `{header, payload, signature}` JWS, verified with the locker key.
+    fn verify_jws(&self, jws: &serde_json::Value) -> serde_json::Value {
+        let part = |name: &str| jws[name].as_str().expect("JWS field").to_string();
+        let compact = [part("header"), part("payload"), part("signature")].join(".");
+        let verifier = josekit::jws::RS256
+            .verifier_from_pem(self.locker_public.as_bytes())
+            .expect("verifier");
+        let (payload, _) =
+            josekit::jws::deserialize_compact(&compact, &verifier).expect("verify response");
+        serde_json::from_slice(&payload).expect("response payload JSON")
+    }
+}
+
+#[cfg(feature = "middleware")]
+async fn start_with_jwe(db: &TestDb, keys: &Keys, jwe: &JweKeys) -> Vault {
+    let vault = Vault::start_with_env(
+        db,
+        &keys.master_key,
+        &[
+            ("LOCKER__SECRETS__LOCKER_PRIVATE_KEY", jwe.locker_private.as_str()),
+            ("LOCKER__TENANT_SECRETS__PUBLIC__PUBLIC_KEY", jwe.tenant_public.as_str()),
+        ],
+    )
+    .await;
+    unlock(&vault, keys).await;
+    vault
+}
+
+#[cfg(feature = "middleware")]
+impl Vault {
+    /// Posts a JWE envelope with the harness caller's key and optional extra headers.
+    async fn post_jwe(
+        &self,
+        path: &str,
+        envelope: serde_json::Value,
+        extra: &[(&str, &str)],
+    ) -> (u16, String) {
+        let mut request = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .header("x-tenant-id", "public")
+            .json(&envelope);
+        if let Some(key) = &self.caller_key {
+            request = request.header("x-vault-caller-key", key);
+        }
+        for (name, value) in extra {
+            request = request.header(*name, *value);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("response body"))
+    }
+}
+
+/// T16: a card is added and read back through the middleware; neither raw response body holds the
+/// card number or the reference in clear; asking for a signed-only response on retrieve still
+/// gets a JWE.
+#[cfg(feature = "middleware")]
+#[tokio::test]
+async fn middleware_requests_and_responses_are_jwe() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let jwe = JweKeys::generate();
+    let vault = start_with_jwe(&db, &keys, &jwe).await;
+
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let (status, body) = vault
+        .post_jwe("/data/add", jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256), &[])
+        .await;
+    assert_eq!(status, 200, "JWE add");
+    assert!(!body.contains("card_reference"), "add response not in clear");
+    let added = jwe.open_response(&body);
+    let reference = added["payload"]["card_reference"]
+        .as_str()
+        .expect("card_reference")
+        .to_string();
+    assert!(!body.contains(&reference), "reference not in clear");
+    assert_eq!(db.count("locker"), 1, "one card stored");
+
+    for extra in [&[][..], &[("x-fp-response-encoding", "jws")][..]] {
+        let (status, body) = vault
+            .post_jwe(
+                "/data/retrieve",
+                jwe.request(&card_request(&reference), &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+                extra,
+            )
+            .await;
+        assert_eq!(status, 200, "JWE retrieve {extra:?}");
+        assert!(!body.contains(CARD_NUMBER), "card number not in clear {extra:?}");
+        assert!(!body.contains("card_number"), "payload not in clear {extra:?}");
+        let opened = jwe.open_response(&body);
+        assert_eq!(
+            opened["payload"]["card"]["card_number"], CARD_NUMBER,
+            "decrypted card {extra:?}"
+        );
+    }
+}
+
+/// T16: a plain JSON body, a body signed with a key the vault does not know, a body whose tag was
+/// altered and a body encrypted with another key-wrapping algorithm are each refused, and none
+/// writes a row.
+#[cfg(feature = "middleware")]
+#[tokio::test]
+async fn middleware_refuses_plain_and_forged_requests() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let jwe = JweKeys::generate();
+    let vault = start_with_jwe(&db, &keys, &jwe).await;
+    let (other_private, _) = rsa_pair();
+
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let mut altered = jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256);
+    let tag = altered["tag"].as_str().expect("tag").to_string();
+    let flipped = if tag.starts_with('A') { "B" } else { "A" };
+    altered["tag"] = serde_json::Value::String(format!("{flipped}{}", &tag[1..]));
+
+    let cases = [
+        ("plain JSON", add.clone()),
+        (
+            "signed with another key",
+            jwe.request(&add, &other_private, &josekit::jwe::RSA_OAEP_256),
+        ),
+        ("altered tag", altered),
+        (
+            "RSA-OAEP instead of RSA-OAEP-256",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP),
+        ),
+    ];
+    for (case, envelope) in cases {
+        let (status, body) = vault.post_jwe("/data/add", envelope, &[]).await;
+        assert!((400..500).contains(&status), "{case}: refused, got {status}");
+        assert!(!body.contains("card_reference"), "{case}: nothing stored");
+    }
+    assert_eq!(data_row_counts(&db), [0; 6], "no row written");
+
+    // The control case: the same add, correctly encrypted and signed, is accepted.
+    let (status, _) = vault
+        .post_jwe("/data/add", jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256), &[])
+        .await;
+    assert_eq!(status, 200, "valid JWE add");
+}
