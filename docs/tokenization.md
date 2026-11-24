@@ -65,8 +65,9 @@ describes it, in the [threat model table](./threat-model.md).
   (`src/routes/data.rs:277`), then returns the card.
 - Access control in this code base is per tenant: every data call must carry a known `x-tenant-id`
   (`src/custom_extractors.rs:27-31`), and with the `middleware` feature every request body must be
-  a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and every response is
-  signed (`src/middleware.rs:81`).
+  a JWE that the vault decrypts with its key pair (`src/middleware.rs:58-59`), and responses are
+  signed, then encrypted as a JWE (`src/middleware.rs:92-96`), unless the caller asks for a
+  signed-only response on the fingerprint route, which is then readable (`src/middleware.rs:79-90`).
 - A tenant may also declare its callers: each has a random key, of which the configuration holds
   only the SHA-256, and the list of merchants whose cards it may read (`src/config.rs:154-167`).
   For such a tenant, a read needs the `x-vault-caller-key` header with a known key, and the
