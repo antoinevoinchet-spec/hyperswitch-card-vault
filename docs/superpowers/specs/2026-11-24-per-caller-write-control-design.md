@@ -66,7 +66,8 @@ to `config/` and `demo/` for it.
     refuse every data call until one is declared; this is the intended effect.
   - `tests/vault_e2e.rs`: the harness declares one default caller, allowed for the merchants and
     entities the existing tests use, and sends its key, so existing tests keep their meaning.
-  - `src/config.rs`: unchanged (the refusal happens at request time, not at start-up).
+  - `src/config.rs`: not changed by D-A (the refusal happens at request time, not at start-up);
+    D-B changes it (below).
 - **Option B (set aside):** keep the check optional and say so at the top of T19 and T37. Fewer
   files, but a misconfigured tenant stays open to reads and writes with no signal.
 - Not changed by D-A: the fingerprint routes, `/entity` and `/key/transfer`, which stay outside

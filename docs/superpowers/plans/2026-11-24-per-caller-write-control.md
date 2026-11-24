@@ -34,6 +34,10 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   done with and without `--features key_custodian`, and the count of tests run is checked.
 - Never run a project script with `--help` unless its code handles it.
 - `git status` before each commit; one logical change per commit.
+- Every `gh pr …` / `gh issue …` / `gh run …` command carries `-R antoinevoinchet-spec/hyperswitch-card-vault`.
+- No `.env*` file is read; the local admin database URL is the one of the local PostgreSQL started
+  for the tests (as in T2: port 54330), never taken from a file.
+- No compliance, certification or audit claim in any added line (checked in Task 6 and Task 7).
 
 ## Review Focus
 
@@ -46,13 +50,15 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
    `merchant` count is asserted in Task 1 (`caller_adds_only_for_its_merchants`).
 4. A refused delete of a reference that does not exist must answer the same 403 as an existing
    one (no existence oracle): Task 1 (`caller_deletes_only_its_merchants_cards`).
-5. `/cards/add` and `/cards/delete`, if mounted as aliases like `/cards/retrieve`: Task 3 step 1
-   reads `src/app.rs` and adds them to the v1 tests if they exist.
+5. `/cards/add` and `/cards/delete` exist: `src/app.rs:192-205` mounts the same v1 router under
+   `/data` and `/cards`. The v1 tests of Task 1 refuse an add and a delete on `/cards/…` too.
+   No other route writes `locker`, `hash_table` or `vault` rows on a caller's request (read on
+   2026-11-24: the rest of the table is `/entity`, `/key/transfer` and the fingerprint routes).
 
 ---
 
 ### Task 1: end-to-end tests first, red on the current code
-**Couvre:** D2, D3, D4, D5, D6, D7, D9, D11
+**Couvre:** D2, D3, D4, D5, D6, D7, D8, D9, D10, D11
 
 **Files:**
 - Modify: `tests/vault_e2e.rs` (harness near `:307-375`, caller helpers near `:2580-2660`, new tests
@@ -75,23 +81,30 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   `audit_of`:
   - `caller_adds_only_for_its_merchants` (D2): callers `writer` (M1, `add`) and `other` (M2, all
     rights); add for M1 by `writer` 200; counts before; add for M2 by `writer`: exact 403; counts
-    after equal (all four); audit `("locker_add","failure",403)` last.
+    after equal (all four); audit `("locker_add","failure",403)` last; the same refused add on
+    `/cards/add`: exact 403, counts equal; an add for a merchant that never existed and is not
+    listed, with a body that `request.validate()` refuses (read the `Validation` impl of
+    `StoreCardRequest` to pick one): exact 403, not the validation error, and the `merchant` count
+    unchanged (D8: the check runs before validation and before `find_or_create_entity`).
   - `caller_deletes_only_its_merchants_cards` (D3): `other` stores a card for M2; `writer` (M1,
     `delete`) deletes it: exact 403; counts equal; `other` reads it back 200 with the exact number;
     `writer` deletes a random reference of M2: same exact 403; audit
-    `("locker_delete","failure",403)`; a third caller `owner` (M1, all rights) stores a card for M1;
+    `("locker_delete","failure",403)`; the same refused delete on `/cards/delete`: exact 403; a third caller `owner` (M1, all rights) stores a card for M1;
     `writer` deletes it 200, then `owner` reads it and gets 404.
   - `caller_without_a_valid_key_cannot_add_or_delete` (D4): add and delete with no key, then with
     a random key: exact 401 each, counts equal, four audit rows at 401.
   - `caller_adds_and_deletes_only_its_entities_through_v2` (D5): as D2 and D3 on
     `/api/v2/vault/add` and `/api/v2/vault/delete` with `entity_id`, counts equal, audit
-    `vault_add` / `vault_delete` at 403.
+    `vault_add` / `vault_delete` at 403; a v2 add for an entity that never existed and is not
+    listed, with a body `validate()` refuses: exact 403, `merchant` count unchanged (D8).
   - `caller_without_a_valid_key_cannot_add_or_delete_through_v2` (D5): as D4 on v2.
   - `caller_needs_the_right_for_each_operation` (D6): callers `reader` (M1, no `rights` variable),
     `adder` (M1, `add`), `deleter` (M1, `delete`); on v1 then v2: each allowed operation 200 and
-    each other one exact 403, counts equal after each refusal.
+    each other one exact 403, counts equal after each refusal; the audit row of the first refusal
+    (`reader` adding) is `("locker_add","failure",403)`.
   - `tenant_without_callers_refuses_every_data_call` (D7): `start_without_callers`; read, add,
-    delete on v1 and v2 (six calls, with a key and without): exact 401, counts equal.
+    delete on v1 and v2 (six calls, with a key and without): exact 401, counts equal; audit rows of
+    the v1 add and the v2 delete at 401.
 - [ ] **Step 3:** run the seven tests (names literal, `-- --exact`), with and without
   `key_custodian`. Expected: each fails at a refusal assertion (`status`, left 200), never at
   start-up, at an add meant to pass, or at a count. Record the lines in the execution notes.
@@ -99,10 +112,12 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   `docs: record the red-run lines before the write control`.
 
 ### Task 2: rights and the check function, unit tests first
-**Couvre:** D1, D7, D10
+**Couvre:** D1, D7
 
 **Files:**
-- Modify: `src/config.rs:154-167` (needs the owner's approval), `src/custom_extractors.rs:139-299`
+- Modify: `src/config.rs:154-167` (needs the owner's approval), `src/custom_extractors.rs:139-299`,
+  `src/routes/data.rs:17-20,257-261` and `src/routes/routes_v2/data.rs:13,80-84` (the two read call
+  sites move to `authorize_caller(…, CallerRight::Read)` here, so the crate still compiles)
 
 **Interfaces:**
 - Produces: `CallerConfig.rights: String` with `#[serde(default = "default_caller_rights")]`
@@ -111,11 +126,14 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   Option<&Secret<String>>, merchant_id: &str, right: CallerRight) -> Result<(), ApiError>`;
   `authorize_read` removed.
 
+- [ ] **Step 0:** stop unless the owner has said yes to changing `src/config.rs`.
 - [ ] **Step 1:** rename the existing unit tests' calls to `authorize_caller(…, CallerRight::Read)`
   (names kept), replace `authorize_read_allows_any_read_without_callers` with
   `authorize_caller_refuses_every_call_without_callers` (each right, `None` and a key:
-  `CallerKeyMissingOrUnknown`), and add: `authorize_caller_allows_only_the_listed_rights` (`add`
-  only: Add Ok, Read and Delete `CallerNotAllowed`), `authorize_caller_reads_by_default` (rights
+  `CallerKeyMissingOrUnknown`), and add: `authorize_caller_allows_only_the_listed_rights` (for
+  each of `read`, `add`, `delete` alone: that right Ok for a listed merchant and `CallerNotAllowed`
+  for an unlisted one, the two other rights `CallerNotAllowed`; `rights = ""`: every right
+  refused), `authorize_caller_reads_by_default` (rights
   absent from a TOML-deserialized `CallerConfig`: Read Ok, Add and Delete refused),
   `authorize_caller_ignores_unknown_rights` (`write`, `read, add`: only what is spelled exactly is
   granted), `authorize_caller_does_not_mix_two_callers_rights` (Review Focus 2). Stub
@@ -124,7 +142,8 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 - [ ] **Step 2:** implement. Empty `callers` → `CallerKeyMissingOrUnknown`. Otherwise as T2, and a
   matching caller allows only if its merchant list holds `merchant_id` **and** its `rights` list
   holds the right's word (both on the same caller).
-- [ ] **Step 3:** `cargo test -j 4 --lib` green, both modes. Commit
+- [ ] **Step 3:** rewire the two retrieve call sites to `authorize_caller(…, CallerRight::Read)`;
+  `cargo build -j 4` and `cargo test -j 4 --lib` green, both modes. Commit
   `feat: add per-caller rights and refuse tenants without callers`.
 
 ### Task 3: wire the check into the six routes
@@ -138,23 +157,25 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 **Interfaces:**
 - Consumes: `OptionalCallerKey`, `authorize_caller`, `CallerRight` (Task 2).
 
-- [ ] **Step 1:** read the routes in `src/app.rs`; note whether `/cards/add` or `/cards/delete`
-  exist (Review Focus 5) and, if so, add their calls to the v1 tests of Task 1.
-- [ ] **Step 2:** add `OptionalCallerKey(caller_key)` to the four write handlers, pass it to the
+- [ ] **Step 1:** add `OptionalCallerKey(caller_key)` to the four write handlers, pass it to the
   inner functions, and call `authorize_caller(&tenant_app_state.config.tenant_secrets.callers,
   caller_key.as_ref(), &request.merchant_id /* v2: entity_id */, CallerRight::Add|Delete)?` as the
-  first statement (before `request.validate()`); retrieve calls pass `CallerRight::Read`.
-- [ ] **Step 3:** `E2E` on the seven new tests (7 passed) and the whole file (expected 43 passed
+  first statement (before `request.validate()`).
+- [ ] **Step 2:** `E2E` on the seven new tests (7 passed) and the whole file (expected 43 passed
   with `key_custodian`), both modes for the new tests. Commit
   `feat: check the caller's rights before a card is added or deleted`.
 
 ### Task 4: demo and example configuration
-**Couvre:** D9, D10
+**Couvre:** D-A, D9, D10
 
 **Files:**
 - Modify: `demo/run.sh` (keys block `:100-108`, start `:111-118`, `step` `:130-145`),
   `demo/README.md`, `config/config.example.toml`
 
+- [ ] **Step 0:** search `/data/`, `/cards/`, `/api/v2/vault/` in `.github/workflows`, `Makefile`,
+  `scripts/`, `README.md`, `docs/` (read on 2026-11-24: in CI only `make demo` and the e2e tests
+  call these routes; `docs/openapi*` and the Postman collection describe them, reported only).
+  If a caller outside the allowed files would break, stop and ask the owner.
 - [ ] **Step 1:** `demo/run.sh`: `CALLER_KEY=$(openssl rand -hex 32)`, its hash with
   `printf '%s' "$CALLER_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1`; pass
   `LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__DEMO__KEY_HASH`, `…__MERCHANTS` (every merchant and
@@ -168,14 +189,17 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   Commit `feat: give the demo its own caller key`.
 
 ### Task 5: deliberate breakage
-**Couvre:** D11
+**Couvre:** D6, D7, D11
 
 - [ ] **Step 1:** remove the four write calls of `authorize_caller` (no commit); run the six write
   tests, both modes: each fails at the refusal's status. Restore with `git checkout --`.
 - [ ] **Step 2:** make the empty-`callers` branch return `Ok(())` (no commit); run
   `tenant_without_callers_refuses_every_data_call` and the unit tests, both modes: fail at the
   401. Restore; `git status` clean in `src/`; the seven tests pass again.
-- [ ] **Step 3:** record the lines in the execution notes; commit
+- [ ] **Step 3:** make `authorize_caller` ignore `rights` (merchant list only; no commit); run
+  `caller_needs_the_right_for_each_operation` and the rights unit tests, both modes: fail at the
+  first refused right. Restore.
+- [ ] **Step 4:** record the lines in the execution notes; commit
   `docs: record the red-run lines with the write control removed`.
 
 ### Task 6: threat table, tokenization doc, README
@@ -190,21 +214,31 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
   status `proven`. T19: drop add, delete and tenants without callers from "Not covered", replace
   `authorize_read_allows_any_read_without_callers` by
   `authorize_caller_refuses_every_call_without_callers`, shift every moved line reference.
-  Add T37 to the list of rows cited by the e2e command.
+  Add T37 to the list of rows cited by the e2e command. Then re-read every `path:N` of the whole
+  table that points into a file this branch changed (`tests/vault_e2e.rs`, `src/routes/…`,
+  `src/custom_extractors.rs`, `src/config.rs`, `demo/run.sh`, `config/config.example.toml`,
+  `docs/tokenization.md`) and fix each one that moved: the script checks that a line exists, not
+  that it is the right one.
 - [ ] **Step 2:** `docs/tokenization.md`: the de-tokenization section and the "No masking…"
   paragraph describe rights, the mandatory check and what stays open. `README.md`: every changed
   file listed (`src/config.rs`, `src/custom_extractors.rs`, `src/routes/data.rs`,
   `src/routes/routes_v2/data.rs`, `tests/vault_e2e.rs`, `demo/run.sh`, `demo/README.md`,
   `config/config.example.toml`, the two docs, the design and this plan).
 - [ ] **Step 3:** `scripts/check-threat-model.sh`: exit 0 and `38 rows (18 proven, 6 not tested,
-  14 open)`; `grep -c` of `GHSA` and `advisories` in the three files: 0. Commit
+  14 open)`; `grep -c` of `GHSA` and `advisories` in the three files: 0; the added lines of the
+  three files re-read for any compliance, certification or audit claim (patterns kept in the
+  scratchpad, not in the repository); the e2e command of "How to check it yourself" run as written,
+  with `VAULT_TEST_REQUIRE_DB=1`, with and without `--features key_custodian`: exit 0. Commit
   `docs: mark T37 proven by the per-caller write control`.
 
 ### Task 7: full checks and reviews
 
 - [ ] `cargo fmt --all --check`; `RUSTFLAGS="-D warnings" cargo clippy -j 4 --all-features
   --all-targets`; `cargo test -j 4`; `E2E` whole file both modes; `make demo`; scans of every kept
-  output; `git diff main --name-only` against the allowed lists.
+  output; `git diff main -U0 | grep '^+' | grep -cE '[0-9a-f]{64}'` gives 0 (count only, never
+  printed); `git diff main --name-only` against the allowed lists and against the README list.
+  `typos`, `cargo nextest` and `cargo +nightly fmt` are not installed: reported "not run", nothing
+  installed; the CI checks them.
 - [ ] `security-review` on the branch; then, in parallel, a fresh `opus` subagent and
   `second-avis --reserve 50`, each with the owner's brief verbatim, the diff without context
   lines (`custodian_key1` / `custodian_key2` lines removed) and the Completion criteria.
@@ -213,7 +247,9 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 ### Task 8: push, PR, CI, note (each after the owner's yes)
 
 - [ ] Push; show the PR title and text; open it with `-R antoinevoinchet-spec/hyperswitch-card-vault`;
-  watch CI; tick T12 in the Obsidian note, update D-A and D-B under "Décisions", add a dated log line.
+  watch CI; a red job caused by this branch is fixed on the branch and pushed again only after the
+  owner's yes; a red job caused by the original code is reported and fixed only after the owner's
+  yes; tick T12 in the Obsidian note, update D-A and D-B under "Décisions", add a dated log line.
 
 ## Execution notes
 
