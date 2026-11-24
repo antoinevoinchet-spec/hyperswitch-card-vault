@@ -14,7 +14,10 @@ use crate::{
     app::TenantAppState,
     audit,
     crypto::{hash_manager::managers::sha::CardDedupHmac, keymanager},
-    custom_extractors::{AuditRequestId, OptionalFingerprintId, TenantStateResolver},
+    custom_extractors::{
+        AuditRequestId, OptionalCallerKey, OptionalFingerprintId, TenantStateResolver,
+        authorize_read,
+    },
     domain::{fingerprint, hash},
     error::{self, ContainerError, ResultContainerExt},
     logger,
@@ -237,18 +240,26 @@ async fn delete_card_inner(
 pub async fn retrieve_card(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Json(request): Json<types::RetrieveCardRequest>,
 ) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
     let pending =
         audit::retrieve_card_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = retrieve_card_inner(Arc::clone(&tenant_app_state), request).await;
+    let result = retrieve_card_inner(Arc::clone(&tenant_app_state), caller_key, request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
 
 async fn retrieve_card_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     request: types::RetrieveCardRequest,
 ) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
+    authorize_read(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.merchant_id,
+    )?;
+
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.merchant_id.clone())
         .await?;

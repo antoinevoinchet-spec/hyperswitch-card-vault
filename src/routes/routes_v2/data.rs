@@ -4,13 +4,13 @@ use std::sync::Arc;
 
 use axum::{Json, extract::Query};
 use error_stack::ResultExt;
-use hyperswitch_masking::PeekInterface;
+use hyperswitch_masking::{PeekInterface, Secret};
 
 use crate::{
     app::TenantAppState,
     audit,
     crypto::keymanager,
-    custom_extractors::{AuditRequestId, TenantStateResolver},
+    custom_extractors::{AuditRequestId, OptionalCallerKey, TenantStateResolver, authorize_read},
     error::{self, ContainerError, ResultContainerExt},
     logger,
     observability::metrics,
@@ -62,19 +62,27 @@ async fn delete_data_inner(
 pub async fn retrieve_data(
     TenantStateResolver(tenant_app_state): TenantStateResolver,
     AuditRequestId(request_id): AuditRequestId,
+    OptionalCallerKey(caller_key): OptionalCallerKey,
     Json(request): Json<types::RetrieveDataRequest>,
 ) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
     let pending =
         audit::retrieve_data_audit(&tenant_app_state.config.tenant_id, request_id, &request);
-    let result = retrieve_data_inner(Arc::clone(&tenant_app_state), request).await;
+    let result = retrieve_data_inner(Arc::clone(&tenant_app_state), caller_key, request).await;
     audit::record(&tenant_app_state.db, pending, result).await
 }
 
 #[tracing::instrument(skip_all)]
 async fn retrieve_data_inner(
     tenant_app_state: Arc<TenantAppState>,
+    caller_key: Option<Secret<String>>,
     request: types::RetrieveDataRequest,
 ) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
+    authorize_read(
+        &tenant_app_state.config.tenant_secrets.callers,
+        caller_key.as_ref(),
+        &request.entity_id,
+    )?;
+
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
         .find_by_entity_id(&tenant_app_state, request.entity_id.clone())
         .await?;

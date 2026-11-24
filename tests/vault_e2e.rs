@@ -2569,3 +2569,257 @@ async fn card_moved_to_another_merchant_is_not_returned() {
     );
     assert_no_secret(&body, &[CARD_NUMBER.to_string(), CARD_2.to_string()]);
 }
+
+// Per-caller read control (T19), see
+// `docs/superpowers/specs/2026-11-24-per-caller-read-control-design.md`. Caller keys are generated
+// here and never printed; the configuration receives only their SHA-256. Assertion messages never
+// print a response body.
+
+const NOT_ALLOWED: &str = "Caller is not allowed to read this merchant's data";
+const KEY_REFUSED: &str = "Caller key missing or unknown";
+
+/// A random caller key (hex) and the lower-case hex SHA-256 the configuration holds for it.
+fn caller_key() -> (String, String) {
+    let key = hex::encode(random_bytes(32));
+    let hash = hex::encode(ring::digest::digest(&ring::digest::SHA256, key.as_bytes()));
+    (key, hash)
+}
+
+/// Starts the vault with one caller, `reader`, allowed to read `merchants` (comma-separated).
+async fn start_with_caller(db: &TestDb, keys: &Keys, key_hash: &str, merchants: &str) -> Vault {
+    Vault::start_with_env(
+        db,
+        &keys.master_key,
+        &[
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__READER__KEY_HASH",
+                key_hash,
+            ),
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__READER__MERCHANTS",
+                merchants,
+            ),
+        ],
+    )
+    .await
+}
+
+impl Vault {
+    /// Like `post`, with `x-vault-caller-key` set when `key` is given.
+    async fn post_with_key(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        key: Option<&str>,
+    ) -> (u16, String) {
+        let mut request = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .header("x-tenant-id", "public")
+            .json(&body);
+        if let Some(key) = key {
+            request = request.header("x-vault-caller-key", key);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("response body"))
+    }
+}
+
+/// Fails unless the response is exactly the refusal `message` with `status`, holding no card number.
+fn assert_refusal(status: u16, body: &str, expected_status: u16, message: &str, what: &str) {
+    assert_eq!(status, expected_status, "{what}: status");
+    let parsed: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+    assert!(
+        parsed == serde_json::json!({ "code": "TE_00", "message": message, "data": null }),
+        "{what}: the body is not the expected refusal"
+    );
+    assert!(
+        !body.contains(CARD_NUMBER) && !body.contains(CARD_2),
+        "{what}: card number in the refusal body"
+    );
+}
+
+/// `(operation, outcome, status_code)` of the audit rows of `operation`, in order.
+fn audit_of(db: &TestDb, operation: &str) -> Vec<(String, String, i16)> {
+    db.audit_rows()
+        .into_iter()
+        .filter(|row| row.operation == operation)
+        .map(|row| (row.operation, row.outcome, row.status_code))
+        .collect()
+}
+
+fn audit_holds_no_card(db: &TestDb) -> bool {
+    db.audit_rows()
+        .iter()
+        .all(|row| !row.text.contains(CARD_NUMBER) && !row.text.contains(CARD_2))
+}
+
+#[tokio::test]
+async fn caller_reads_only_its_merchants_cards() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (key, key_hash) = caller_key();
+    let vault = start_with_caller(&db, &keys, &key_hash, MERCHANT).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "own-card").await;
+    store_card_with_ref(
+        &vault,
+        MERCHANT_2,
+        CUSTOMER,
+        card_data_with(CARD_2),
+        "other-card",
+    )
+    .await;
+
+    for path in ["/data/retrieve", "/cards/retrieve"] {
+        let (status, body) = vault
+            .post_with_key(path, retrieve_request(MERCHANT, "own-card"), Some(&key))
+            .await;
+        assert_eq!(
+            status, 200,
+            "{path}: the caller reads its own merchant's card"
+        );
+        assert_card_number(&body, CARD_NUMBER, "own-card");
+
+        // The other merchant's card exists, with its correct reference and customer.
+        let (status, body) = vault
+            .post_with_key(path, retrieve_request(MERCHANT_2, "other-card"), Some(&key))
+            .await;
+        assert_refusal(status, &body, 403, NOT_ALLOWED, path);
+    }
+
+    // A reference that does not exist gets the same refusal, not a 404: the check runs first.
+    let (status, body) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT_2, "no-such-card"),
+            Some(&key),
+        )
+        .await;
+    assert_refusal(
+        status,
+        &body,
+        403,
+        NOT_ALLOWED,
+        "missing card of another merchant",
+    );
+
+    let expected: Vec<(String, String, i16)> = [
+        ("success", 200),
+        ("failure", 403),
+        ("success", 200),
+        ("failure", 403),
+        ("failure", 403),
+    ]
+    .iter()
+    .map(|(outcome, code)| ("locker_retrieve".to_string(), outcome.to_string(), *code))
+    .collect();
+    assert!(
+        audit_of(&db, "locker_retrieve") == expected,
+        "the audit rows of the reads differ from the expected outcomes"
+    );
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+#[tokio::test]
+async fn caller_without_a_valid_key_is_refused() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (_key, key_hash) = caller_key();
+    let (unknown_key, _) = caller_key();
+    let vault = start_with_caller(&db, &keys, &key_hash, MERCHANT).await;
+    unlock(&vault, &keys).await;
+    store_card_with_ref(&vault, MERCHANT, CUSTOMER, card_data(), "own-card").await;
+
+    let (status, body) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT, "own-card"),
+            None,
+        )
+        .await;
+    assert_refusal(status, &body, 401, KEY_REFUSED, "no key");
+
+    let (status, body) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request(MERCHANT, "own-card"),
+            Some(&unknown_key),
+        )
+        .await;
+    assert_refusal(status, &body, 401, KEY_REFUSED, "unknown key");
+
+    let (status, body) = vault
+        .post_with_key(
+            "/data/retrieve",
+            retrieve_request("no-such-merchant", "no-such-card"),
+            None,
+        )
+        .await;
+    assert_refusal(status, &body, 401, KEY_REFUSED, "no key, unknown merchant");
+
+    let refused = (
+        "locker_retrieve".to_string(),
+        "failure".to_string(),
+        401_i16,
+    );
+    assert!(
+        audit_of(&db, "locker_retrieve") == vec![refused.clone(), refused.clone(), refused],
+        "the audit rows of the refused reads differ from three 401 failures"
+    );
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}
+
+#[tokio::test]
+async fn caller_reads_only_its_entities_through_v2() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let (key, key_hash) = caller_key();
+    let vault = start_with_caller(&db, &keys, &key_hash, MERCHANT).await;
+    unlock(&vault, &keys).await;
+
+    for (entity, number) in [(MERCHANT, CARD_NUMBER), (MERCHANT_2, CARD_2)] {
+        let (status, _) = vault
+            .post(
+                "/api/v2/vault/add",
+                serde_json::json!({
+                    "entity_id": entity,
+                    "vault_id": "v2-card",
+                    "data": { "card_number": number },
+                    "ttl": null
+                }),
+            )
+            .await;
+        assert_eq!(status, 200, "v2 add for {entity}");
+    }
+
+    let request = |entity: &str| serde_json::json!({ "entity_id": entity, "vault_id": "v2-card" });
+    let (status, body) = vault
+        .post_with_key("/api/v2/vault/retrieve", request(MERCHANT), Some(&key))
+        .await;
+    assert_eq!(status, 200, "the caller reads its own entity's data");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("v2 retrieve JSON");
+    assert!(
+        parsed["data"]["card_number"].as_str() == Some(CARD_NUMBER),
+        "v2 read does not return the stored data"
+    );
+
+    let (status, body) = vault
+        .post_with_key("/api/v2/vault/retrieve", request(MERCHANT_2), Some(&key))
+        .await;
+    assert_refusal(status, &body, 403, NOT_ALLOWED, "v2 other entity");
+
+    let expected = vec![
+        ("vault_retrieve".to_string(), "success".to_string(), 200_i16),
+        ("vault_retrieve".to_string(), "failure".to_string(), 403_i16),
+    ];
+    assert!(
+        audit_of(&db, "vault_retrieve") == expected,
+        "the audit rows of the v2 reads differ from the expected outcomes"
+    );
+    assert!(audit_holds_no_card(&db), "card number in an audit row");
+}

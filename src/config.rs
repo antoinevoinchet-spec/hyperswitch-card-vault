@@ -150,6 +150,20 @@ pub struct TenantSecrets {
     /// Redis key prefix (deser-only; app reads `TenantConfig.redis_key_prefix`).
     #[cfg(feature = "redis")]
     pub redis_key_prefix: String,
+
+    /// Callers allowed to read cards, by name. Empty: any caller of the tenant reads any card.
+    #[serde(default)]
+    pub callers: HashMap<String, CallerConfig>,
+}
+
+/// One caller of a tenant and the merchants whose cards it may read.
+#[derive(serde::Deserialize, Debug, Clone)]
+pub struct CallerConfig {
+    /// Lower-case hex SHA-256 of the caller's key. The key itself is never configured. Masked in
+    /// `Debug`, so the start-up configuration dump does not print it.
+    pub key_hash: Secret<String>,
+    /// Comma-separated merchant ids (v1) or entity ids (v2) this caller may read, with no spaces.
+    pub merchants: String,
 }
 
 fn deserialize_hex<'de, D>(deserializer: D) -> Result<Secret<Vec<u8>>, D::Error>
