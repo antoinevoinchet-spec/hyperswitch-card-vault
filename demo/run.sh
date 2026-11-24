@@ -106,6 +106,14 @@ KEY2=$(printf '%s\n' "$KEYS" | sed -n 's/^key 2: *//p')
 WRONG_KEY2=$(openssl rand -hex 16)
 unset KEYS
 echo "Generated an encrypted master key and its two custodian keys (not shown)."
+# Every tenant must declare its callers (T37): the demo is one caller, allowed to read, add and
+# delete for its merchant. The vault receives only the key's SHA-256; the key goes to curl from a
+# file in the private temporary folder, so it is in neither the process list nor the output.
+CALLER_KEY=$(openssl rand -hex 32)
+CALLER_KEY_HASH=$(printf '%s' "$CALLER_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1)
+(umask 077 && printf 'x-vault-caller-key: %s\n' "$CALLER_KEY" >"$TMP/caller-header")
+unset CALLER_KEY
+echo "Generated a caller key for the demo (not shown)."
 
 title "Start the vault"
 LOCKER__SERVER__PORT=$VAULT_PORT \
@@ -115,6 +123,9 @@ LOCKER__DATABASE__USERNAME=$DB_USER \
 LOCKER__DATABASE__PASSWORD=$DB_PASS \
 LOCKER__DATABASE__DBNAME=$DB_NAME \
 LOCKER__TENANT_SECRETS__PUBLIC__MASTER_KEY=$MASTER_KEY \
+LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__DEMO__KEY_HASH=$CALLER_KEY_HASH \
+LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__DEMO__MERCHANTS=$MERCHANT \
+LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__DEMO__RIGHTS=read,add,delete \
   target/debug/locker >"$TMP/locker.log" 2>&1 &
 LOCKER_PID=$!
 for _ in $(seq 1 240); do
@@ -133,7 +144,7 @@ step() {
   echo "$explanation"
   echo "  request : POST ${path} $(printf '%s' "$shown" | jq -c .)"
   status=$(printf '%s' "$body" | curl -s -o "$TMP/body" -w '%{http_code}' -X POST \
-    -H 'content-type: application/json' -H "x-tenant-id: ${TENANT}" \
+    -H 'content-type: application/json' -H "x-tenant-id: ${TENANT}" -H @"$TMP/caller-header" \
     --data-binary @- "${BASE}${path}")
   echo "  status  : ${status}"
   echo "  response: $(jq -c . "$TMP/body" 2>/dev/null || cat "$TMP/body")"

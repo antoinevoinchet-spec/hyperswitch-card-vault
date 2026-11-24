@@ -21,7 +21,9 @@ The script (`demo/run.sh`):
 1. builds the `locker` and `utils` programs with the `key_custodian` feature (debug profile);
 2. creates a throwaway PostgreSQL cluster in a temporary folder, listening on `127.0.0.1:54329`
    (`DEMO_PG_PORT` to change it), and applies every migration, including the `audit_log` table;
-3. generates a throwaway encrypted master key and its two custodian keys with `utils master-key`;
+3. generates a throwaway encrypted master key and its two custodian keys with `utils master-key`,
+   and a random caller key: the vault receives only its SHA-256, and every request sends the key in
+   `x-vault-caller-key` (a tenant with no caller refuses every read, add and delete);
 4. starts the vault and plays the ten steps below;
 5. prints the audit log and six checks, then stops the vault, stops the cluster and deletes the
    temporary folder, even if a step fails or the run is interrupted.
