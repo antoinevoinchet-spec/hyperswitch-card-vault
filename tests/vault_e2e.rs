@@ -3550,3 +3550,111 @@ async fn tenant_without_callers_refuses_every_data_call() {
         "the refused v2 delete has no 401 audit row"
     );
 }
+
+// Controls that were in the code without a test (task T3: T12, T14, T15, T16, T17), see
+// `docs/superpowers/specs/2026-11-25-untested-controls-design.md`.
+
+impl Vault {
+    /// Posts `body` with the harness caller's key and `tenant` as `x-tenant-id` (no header when
+    /// `None`).
+    async fn post_as_tenant(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        tenant: Option<&str>,
+    ) -> (u16, String) {
+        let mut request = self.client.post(format!("{}{path}", self.base)).json(&body);
+        if let Some(tenant) = tenant {
+            request = request.header("x-tenant-id", tenant);
+        }
+        if let Some(key) = &self.caller_key {
+            request = request.header("x-vault-caller-key", key);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("response body"))
+    }
+}
+
+/// Row counts of every table a data route writes: locker, hash, merchant, fingerprint, vault and
+/// entity.
+fn data_row_counts(db: &TestDb) -> [i64; 6] {
+    ["locker", "hash_table", "merchant", "fingerprint", "vault", "entity"].map(|table| db.count(table))
+}
+
+/// One request for each data route: v1 under `/data` and `/cards`, v2, and `/entity`.
+fn every_data_request(reference: &str) -> Vec<(String, serde_json::Value)> {
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let fingerprint = serde_json::json!({ "data": CARD_NUMBER, "key": "fingerprint-test-key" });
+    let v2_ref = serde_json::json!({ "entity_id": MERCHANT, "vault_id": reference });
+    let mut requests = Vec::new();
+    for prefix in ["/data", "/cards"] {
+        requests.push((format!("{prefix}/add"), add.clone()));
+        requests.push((format!("{prefix}/retrieve"), card_request(reference)));
+        requests.push((format!("{prefix}/delete"), card_request(reference)));
+        requests.push((format!("{prefix}/fingerprint"), fingerprint.clone()));
+    }
+    requests.push((
+        "/api/v2/vault/add".to_string(),
+        serde_json::json!({
+            "entity_id": MERCHANT,
+            "vault_id": reference,
+            "data": { "card_number": CARD_NUMBER },
+            "ttl": null
+        }),
+    ));
+    requests.push(("/api/v2/vault/retrieve".to_string(), v2_ref.clone()));
+    requests.push(("/api/v2/vault/delete".to_string(), v2_ref));
+    requests.push(("/api/v2/vault/fingerprint".to_string(), fingerprint));
+    requests.push(("/entity".to_string(), serde_json::json!({ "entity_id": MERCHANT })));
+    requests
+}
+
+/// T15: a tenant id that is not configured, or no tenant id, is refused on every data route
+/// before any row is read or written, with the tenant error and not the lock error.
+#[tokio::test]
+async fn unknown_tenant_is_refused_on_every_data_route() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let reference = store_card(&vault).await;
+    let before = data_row_counts(&db);
+
+    let unknown = r#"{"code":"TE_03","message":"Tenant error: Invalid x-tenant-id","data":null}"#;
+    let missing =
+        r#"{"code":"TE_03","message":"Tenant error: x-tenant-id not found in headers","data":null}"#;
+    for tenant in [Some("no-such-tenant"), Some("PUBLIC"), Some(""), None] {
+        for (path, body) in every_data_request(&reference) {
+            let (status, response) = vault.post_as_tenant(&path, body, tenant).await;
+            let expected = if tenant.is_some() { unknown } else { missing };
+            assert_eq!(
+                (status, response.as_str()),
+                (400, expected),
+                "{path} with tenant {tenant:?}"
+            );
+        }
+    }
+    #[cfg(feature = "key_custodian")]
+    {
+        let (status, response) = vault
+            .post_as_tenant(
+                "/custodian/key1",
+                serde_json::json!({ "key": keys.key1 }),
+                Some("no-such-tenant"),
+            )
+            .await;
+        assert_eq!((status, response.as_str()), (400, unknown), "custodian key");
+    }
+
+    assert_eq!(data_row_counts(&db), before, "no row written");
+    // The configured tenant still reads its card.
+    let (status, body) = vault.post("/data/retrieve", card_request(&reference)).await;
+    assert_eq!(status, 200, "known tenant");
+    assert_card_number(&body, CARD_NUMBER, &reference);
+}
