@@ -91,6 +91,16 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `tests/vault_e2e.rs`: new tests `each_merchant_key_opens_only_its_own_cards` and `card_moved_to_another_merchant_is_not_returned`.
   - `docs/threat-model.md`: T13 proven, with what the tests do not cover; T13 added to the rows cited by end-to-end tests.
   - `docs/superpowers/specs/2026-11-24-merchant-key-isolation-design.md` and `docs/superpowers/plans/2026-11-24-merchant-key-isolation.md`: design and implementation plan, with the breakage runs.
+- Per-caller read control (a tenant may declare callers, each with a key of which only the SHA-256 is configured and the merchants whose cards it may read; for such a tenant, a card read needs a known key and a listed merchant; a tenant that declares no caller is unchanged):
+  - `src/config.rs`: new optional `callers` section of a tenant and its `CallerConfig` type.
+  - `src/storage/consts.rs`: new header name `x-vault-caller-key`.
+  - `src/custom_extractors.rs`: new `OptionalCallerKey` extractor and `authorize_read` check, with unit tests.
+  - `src/error.rs`: two new errors, a missing or unknown key (HTTP 401) and a merchant not allowed (HTTP 403).
+  - `src/routes/data.rs` and `src/routes/routes_v2/data.rs`: both retrieve routes run the check before any key or row is loaded.
+  - `tests/vault_e2e.rs`: new tests `caller_reads_only_its_merchants_cards`, `caller_without_a_valid_key_is_refused` and `caller_reads_only_its_entities_through_v2`.
+  - `docs/threat-model.md`: T19 proven, with what the control does not cover; T19 added to the rows cited by end-to-end tests; moved line references.
+  - `docs/tokenization.md`: describes the per-caller rule on reads and what it leaves open.
+  - `docs/superpowers/specs/2026-11-24-per-caller-read-control-design.md` and `docs/superpowers/plans/2026-11-24-per-caller-read-control.md`: design and implementation plan, with the breakage runs.
 
 ## Demo
 
