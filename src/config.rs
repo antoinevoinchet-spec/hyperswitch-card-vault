@@ -156,7 +156,7 @@ pub struct TenantSecrets {
     pub callers: HashMap<String, CallerConfig>,
 }
 
-/// One caller of a tenant and the merchants whose cards it may read.
+/// One caller of a tenant: its key, its merchants and what it may do for them.
 #[derive(serde::Deserialize, Debug, Clone)]
 pub struct CallerConfig {
     /// Lower-case hex SHA-256 of the caller's key. The key itself is never configured. Masked in
