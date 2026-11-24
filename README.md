@@ -87,6 +87,10 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/threat-model.md`: T22 proven; T23 cites the external key manager test; new open rows T35 (former key with an older copy of the database) and T36 (the configuration change is manual); moved line references.
   - `docs/tokenization.md`: describes the rotation, how to run it, what it refuses, covers and leaves open; moved line references.
   - `docs/superpowers/specs/2026-11-23-master-key-rotation-design.md` and `docs/superpowers/plans/2026-11-23-master-key-rotation.md`: design and implementation plan.
+- Merchant data key isolation tests (no change to the vault itself: two end-to-end tests prove that each merchant's data key opens only that merchant's cards, and that a card row copied to another merchant is refused on read):
+  - `tests/vault_e2e.rs`: new tests `each_merchant_key_opens_only_its_own_cards` and `card_moved_to_another_merchant_is_not_returned`.
+  - `docs/threat-model.md`: T13 proven, with what the tests do not cover; T13 added to the rows cited by end-to-end tests.
+  - `docs/superpowers/specs/2026-11-24-merchant-key-isolation-design.md` and `docs/superpowers/plans/2026-11-24-merchant-key-isolation.md`: design and implementation plan, with the breakage runs.
 
 ## Demo
 
