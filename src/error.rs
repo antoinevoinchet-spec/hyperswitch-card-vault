@@ -130,6 +130,12 @@ pub enum ApiError {
 
     #[error("Key manager error: {0}")]
     KeyManagerError(&'static str),
+
+    #[error("Caller key missing or unknown")]
+    CallerKeyMissingOrUnknown,
+
+    #[error("Caller is not allowed to read this merchant's data")]
+    CallerNotAllowed,
 }
 
 /// Errors that could occur during KMS operations.
@@ -399,6 +405,24 @@ impl axum::response::IntoResponse for ApiError {
                 hyper::StatusCode::NOT_FOUND,
                 axum::Json(ApiErrorResponse::new(
                     error_codes::TE_02,
+                    format!("{}", data),
+                    None,
+                )),
+            )
+                .into_response(),
+            data @ Self::CallerKeyMissingOrUnknown => (
+                hyper::StatusCode::UNAUTHORIZED,
+                axum::Json(ApiErrorResponse::new(
+                    error_codes::TE_00,
+                    format!("{}", data),
+                    None,
+                )),
+            )
+                .into_response(),
+            data @ Self::CallerNotAllowed => (
+                hyper::StatusCode::FORBIDDEN,
+                axum::Json(ApiErrorResponse::new(
+                    error_codes::TE_00,
                     format!("{}", data),
                     None,
                 )),

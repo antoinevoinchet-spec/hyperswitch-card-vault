@@ -16,6 +16,8 @@ pub const MAX_BATCH_FINGERPRINTS: usize = 5;
 pub const X_TENANT_ID: &str = "x-tenant-id";
 /// Header key for request ID
 pub const X_REQUEST_ID: &str = "x-request-id";
+/// Header key for the caller's key, checked before a card is read when the tenant declares callers
+pub const X_VAULT_CALLER_KEY: &str = "x-vault-caller-key";
 /// Header key for caller-supplied fingerprint ID (optional)
 pub const X_FINGERPRINT_ID: &str = "x-fingerprint-id";
 /// Header key to request a signed-only fingerprint response; echoed back when honoured
