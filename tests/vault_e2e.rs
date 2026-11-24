@@ -2473,8 +2473,12 @@ async fn each_merchant_key_opens_only_its_own_cards() {
         let plain = deks
             .get(&row.merchant_id)
             .and_then(|key| opens(key, &row.enc_data));
+        // The plaintext is the stored JSON, `{"CardData": {"card_number": ...}}`.
+        let stored =
+            plain.and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok());
         assert!(
-            plain.is_some_and(|plain| String::from_utf8_lossy(&plain).contains(number)),
+            stored
+                .is_some_and(|stored| stored["CardData"]["card_number"].as_str() == Some(*number)),
             "{} of {} does not open to its card under its own merchant key",
             row.locker_id,
             row.merchant_id
@@ -2552,14 +2556,16 @@ async fn card_moved_to_another_merchant_is_not_returned() {
     let (status, body) = vault
         .post("/data/retrieve", retrieve_request(MERCHANT_2, "iso-moved"))
         .await;
-    let refused = !(200..300).contains(&status);
+    // The refusal must come from decryption under merchant 2's key (400, crypto error), not from a
+    // lookup that missed the row (404).
+    let refused = status == 400 && body.contains("encrypting/decrypting");
     let leaked = [CARD_NUMBER, CARD_2]
         .iter()
         .any(|number| body.contains(number));
     assert!(
         refused && !leaked,
-        "a card copied from {MERCHANT} is served to {MERCHANT_2} \
-         (status {status}, refused {refused}, card number in body {leaked})"
+        "a card copied from {MERCHANT} is not refused by decryption for {MERCHANT_2} \
+         (status {status}, decryption refusal {refused}, card number in body {leaked})"
     );
     assert_no_secret(&body, &[CARD_NUMBER.to_string(), CARD_2.to_string()]);
 }
