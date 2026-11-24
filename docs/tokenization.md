@@ -70,7 +70,7 @@ describes it, in the [threat model table](./threat-model.md).
   signed-only response on the fingerprint route, which is then readable (`src/middleware.rs:79-90`).
 - Every tenant declares its callers: each has a random key, of which the configuration holds only
   the SHA-256, a list of merchants and the rights it has for them, among `read`, `add` and
-  `delete` (`read` only when it lists none) (`src/config.rs:154-175`). A read, an add or a delete
+  `delete` (`read` only when the field is absent; an empty value grants nothing) (`src/config.rs:154-175`). A read, an add or a delete
   needs the `x-vault-caller-key` header with a known key, the merchant of the request (the entity,
   on the second API version) on that caller's list, and the matching right
   (`src/custom_extractors.rs:139-195`). The check runs before any key or row is loaded or written,

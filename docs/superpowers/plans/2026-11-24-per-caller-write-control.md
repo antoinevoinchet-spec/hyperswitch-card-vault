@@ -284,3 +284,21 @@ numbers and 64-character hex strings: 0 in each.
 | Task 5, `rights` ignored (merchant list only), both modes | `caller_needs_the_right_for_each_operation` and the unit tests | e2e `:2665`: `reader adds: status`, left 200, right 403; unit: 10 passed, 4 failed (`authorize_caller_allows_only_the_listed_rights` `:260`, `authorize_caller_reads_by_default` `:287`, `authorize_caller_ignores_unknown_rights` `:298`, `authorize_caller_does_not_mix_two_callers_rights` `:324`, lines of the mutated file). |
 
 Task 2 (2026-11-24): stub `authorize_caller` returning `Ok(())`, `cargo test -j 4 --lib caller_tests`, both modes: 4 passed, 10 failed (every refusal test); with the check, `cargo test -j 4 --lib`: 62 passed, both modes. Task 3: whole e2e file 43 passed with `key_custodian`, 39 without. Task 4: `make demo` ends with `DEMO OK`. Task 5: each mutation restored with `git checkout --`; `git status` clean; the seven tests pass again (7 passed, `key_custodian`). Every output above scanned for card numbers and 64-character hex strings: 0.
+
+Reviews (2026-11-24):
+- `security-review`: no candidate vulnerability.
+- Fresh `opus` subagent: no deviation that changes the result; verdict "ready".
+- Second opinion (gpt-6.2-sol, through `second-avis`, two calls, code then docs, 0.0467 + 0.0392 USD; a first
+  code call was stopped before sending by the secret filter, because a hunk header quoted the example
+  configuration's master key line: hunk headers are now cut from the diffs sent). Confirmed and fixed:
+  a refusal's audit check could match the previous refusal's row (now each refusal must add one row);
+  equal row counts do not prove that no row changed (each table's content digest is now compared too);
+  `docs/tokenization.md` said `read` applies "when it lists none" (now: only when the field is absent,
+  an empty value grants nothing); T25 sent a caller naming another merchant to T19 only and suggested
+  that customers are separated (now T19 for reads, T37 for adds and deletes, other customers not
+  refused). Rejected: "T37 not proven in the diff" (the docs were in the second call); "`/entity` and
+  `/key/transfer` named in the docs" (kept as what stays open, reported to the owner).
+- After the fixes: fmt and clippy 0; e2e 43 passed with `key_custodian`, 39 without;
+  `scripts/check-threat-model.sh` OK 38 rows (18 proven, 6 not tested, 14 open). The strengthened
+  assertions were not seen failing on their own (no production change to break).
+
