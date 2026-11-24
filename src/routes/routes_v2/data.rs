@@ -10,7 +10,9 @@ use crate::{
     app::TenantAppState,
     audit,
     crypto::keymanager,
-    custom_extractors::{AuditRequestId, OptionalCallerKey, TenantStateResolver, authorize_read},
+    custom_extractors::{
+        AuditRequestId, CallerRight, OptionalCallerKey, TenantStateResolver, authorize_caller,
+    },
     error::{self, ContainerError, ResultContainerExt},
     logger,
     observability::metrics,
@@ -77,10 +79,11 @@ async fn retrieve_data_inner(
     caller_key: Option<Secret<String>>,
     request: types::RetrieveDataRequest,
 ) -> Result<Json<types::RetrieveDataResponse>, ContainerError<error::ApiError>> {
-    authorize_read(
+    authorize_caller(
         &tenant_app_state.config.tenant_secrets.callers,
         caller_key.as_ref(),
         &request.entity_id,
+        CallerRight::Read,
     )?;
 
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)

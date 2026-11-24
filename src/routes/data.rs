@@ -15,8 +15,8 @@ use crate::{
     audit,
     crypto::{hash_manager::managers::sha::CardDedupHmac, keymanager},
     custom_extractors::{
-        AuditRequestId, OptionalCallerKey, OptionalFingerprintId, TenantStateResolver,
-        authorize_read,
+        AuditRequestId, CallerRight, OptionalCallerKey, OptionalFingerprintId, TenantStateResolver,
+        authorize_caller,
     },
     domain::{fingerprint, hash},
     error::{self, ContainerError, ResultContainerExt},
@@ -254,10 +254,11 @@ async fn retrieve_card_inner(
     caller_key: Option<Secret<String>>,
     request: types::RetrieveCardRequest,
 ) -> Result<Json<types::RetrieveCardResponse>, ContainerError<error::ApiError>> {
-    authorize_read(
+    authorize_caller(
         &tenant_app_state.config.tenant_secrets.callers,
         caller_key.as_ref(),
         &request.merchant_id,
+        CallerRight::Read,
     )?;
 
     let crypto_manager = keymanager::get_dek_manager(&tenant_app_state.config.external_key_manager)
