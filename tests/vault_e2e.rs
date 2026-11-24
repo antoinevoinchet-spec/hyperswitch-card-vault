@@ -3758,3 +3758,52 @@ async fn generated_card_reference_is_a_uuid_v7() {
     let supplied = store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "caller-ref-1").await;
     assert_eq!(supplied["payload"]["card_reference"], "caller-ref-1", "supplied reference kept");
 }
+
+/// T12: the fingerprint is keyed by the key the caller sends. The same card under two keys gets
+/// two fingerprints and two rows; the same card under the same key gets the same one, also in a
+/// batch. Nothing here computes or compares a hash: only the fingerprint ids are compared.
+#[tokio::test]
+async fn fingerprint_differs_for_two_caller_keys() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let key_a = hex::encode(random_bytes(32));
+    let key_b = hex::encode(random_bytes(32));
+
+    let fingerprint = |key: String, data: &'static str| {
+        let vault = &vault;
+        async move {
+            let (status, body) = vault
+                .post("/data/fingerprint", serde_json::json!({ "data": data, "key": key }))
+                .await;
+            assert_eq!(status, 200, "fingerprint");
+            assert!(!body.contains(data), "no card number in the response");
+            let body: serde_json::Value = serde_json::from_str(&body).expect("fingerprint JSON");
+            body["fingerprint_id"].as_str().expect("fingerprint_id").to_string()
+        }
+    };
+    let a = fingerprint(key_a.clone(), CARD_NUMBER).await;
+    let b = fingerprint(key_b.clone(), CARD_NUMBER).await;
+    assert_ne!(a, b, "two keys, two fingerprints");
+    assert_eq!(fingerprint(key_a.clone(), CARD_NUMBER).await, a, "same key, same fingerprint");
+    assert_eq!(fingerprint(key_b.clone(), CARD_NUMBER).await, b, "same key, same fingerprint");
+    assert_ne!(fingerprint(key_a.clone(), CARD_2).await, a, "another card, another fingerprint");
+    assert_eq!(db.count("fingerprint"), 3, "one row per key and card");
+
+    let (status, body) = vault
+        .post(
+            "/data/fingerprint",
+            serde_json::json!({ "batch_data": [
+                { "label": "a", "data": CARD_NUMBER, "key": key_a },
+                { "label": "b", "data": CARD_NUMBER, "key": key_b },
+            ] }),
+        )
+        .await;
+    assert_eq!(status, 200, "batch fingerprint");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("batch JSON");
+    assert_eq!(body["fingerprints"]["a"], a.as_str(), "batch, key a");
+    assert_eq!(body["fingerprints"]["b"], b.as_str(), "batch, key b");
+    assert_eq!(db.count("fingerprint"), 3, "no new row");
+}
