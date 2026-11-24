@@ -1,7 +1,7 @@
 # Per-caller read control (threat T19): design
 
 Date: 2026-11-24 (UTC). Branch: `feat/per-caller-read-control` (from `main`, `8336394`). Status:
-draft, waiting for the owner's decision R1 (rights model). Plan to follow in
+decision R1 taken by the owner on 2026-11-24 (option A). Plan to follow in
 `docs/superpowers/plans/2026-11-24-per-caller-read-control.md`.
 
 ## Intent
@@ -87,13 +87,13 @@ key is refused. The T19 row will say that the control applies only to tenants th
 Making it mandatory for every tenant would need changes to `config/`, `demo/` and every existing
 test, and is left as a later decision.
 
-## Requirements (written for option A; rewritten if the owner picks B)
+## Requirements (option A)
 
 - **D1.** A caller whose key lists merchant M1 reads a card of M1 through `/data/retrieve`: status
   200 and the exact stored card number.
   Verifiable by: e2e test `caller_reads_only_its_merchants_cards`, positive half.
 - **D2.** The same caller asking for a card of merchant M2 of the same tenant, with M2's correct
-  reference and customer, gets status 403, `error_code` `TE_00` and the exact message
+  reference and customer, gets status 403, `code` `TE_00` and the exact message
   `Caller is not allowed to read this merchant's data`; the body holds no card number.
   Verifiable by: same test, refused half, comparing the whole parsed body with the expected JSON.
 - **D3.** The refusal happens before any key is loaded or any row is read, so it cannot be confused
@@ -101,15 +101,15 @@ test, and is left as a later decision.
   Verifiable by: D2's exact status and message (a 404 or a 500 fails it), and the check placed as
   the first statement of each retrieve function (read in the diff).
 - **D4.** When the tenant declares callers, a retrieve with no `x-vault-caller-key` header, or with
-  a key that matches no caller, gets status 401, `error_code` `TE_00` and the exact message
+  a key that matches no caller, gets status 401, `code` `TE_00` and the exact message
   `Caller key missing or unknown`, with no card number.
   Verifiable by: e2e test `caller_without_a_valid_key_is_refused` (no header, then a random key).
 - **D5.** `/api/v2/vault/retrieve` applies the same rule to `entity_id`: allowed entity, 200 and the
   stored data; other entity, D2's status and message.
   Verifiable by: e2e test `caller_reads_only_its_entities_through_v2`.
 - **D6.** A refused retrieve still writes its audit row, with a failure outcome and no card number.
-  Verifiable by: D2's test reads the last `audit_log` row (operation `retrieve`, outcome not
-  success) and checks that no audit row contains the card number.
+  Verifiable by: D2's test reads the `audit_log` rows: the refused read is
+  `("locker_retrieve", "failure", 403)`, and no audit row contains the card number.
 - **D7.** A tenant with no `callers` section reads as before, with no header.
   Verifiable by: the 33 existing e2e tests and `make demo` (`DEMO OK`) unchanged and passing.
 - **D8.** The configuration holds only the SHA-256 (hex) of each key; keys are never logged or
