@@ -174,15 +174,19 @@ most a prefix of that hash, from which the key cannot be recovered. The key is h
 
 (filled during execution)
 
-Task 1 runs (2026-11-24): `src/` identical to `main` (`git diff main --stat -- src` empty), PostgreSQL 14 on port 54330; outputs scanned for card numbers and 64-character hex strings: 0 in each.
+Task 1 runs (2026-11-24): `src/` identical to `main` (`git diff main --stat -- src` empty), PostgreSQL 14 on port 54330; outputs scanned for card numbers and 64-character hex strings: 0 in each. The failing line is `tests/vault_e2e.rs:2625` in that run and `:2631` after `cargo fmt` moved it (same `assert_eq!` in `assert_refusal`).
+
+Task 3 (2026-11-24): the three new tests pass with and without `key_custodian` (3 passed each); the whole e2e file with `key_custodian`: 36 passed, 0 failed.
+
+Task 2 (read on 2026-11-24): the request span records only `x-tenant-id` and `x-request-id` (`src/utils.rs:102-124`, used by the trace layer in `src/app.rs:281-283`); no other request header is logged.
 
 | Run | Test | Failure line (assertion and values) |
 |---|---|---|
 | Task 1, before any `src/` change | `caller_reads_only_its_merchants_cards` | `tests/vault_e2e.rs:2625` (`assert_refusal`): `assertion left == right failed: /data/retrieve: status`, left 200, right 403; the read of the caller's own card passed first. Same with and without `key_custodian` (3 run, 0 passed, 3 failed). |
 | Task 1, before any `src/` change | `caller_without_a_valid_key_is_refused` | `tests/vault_e2e.rs:2625`: `no key: status`, left 200, right 401; both modes. |
 | Task 1, before any `src/` change | `caller_reads_only_its_entities_through_v2` | `tests/vault_e2e.rs:2625`: `v2 other entity: status`, left 200, right 403; the two v2 adds and the allowed v2 read passed first; both modes. |
-| Task 4, check removed | `caller_reads_only_its_merchants_cards` | |
-| Task 4, check removed | `caller_without_a_valid_key_is_refused` | |
-| Task 4, check removed | `caller_reads_only_its_entities_through_v2` | |
-| Task 2, stub before the check | unit tests of `authorize_read` | |
-| Task 4, check removed | unit tests of `authorize_read` | |
+| Task 4, check removed | `caller_reads_only_its_merchants_cards` | `authorize_read` made to return `Ok(())` always (not committed): `tests/vault_e2e.rs:2631`, `/data/retrieve: status`, left 200, right 403 (3 run, 0 passed, 3 failed, with `key_custodian`). |
+| Task 4, check removed | `caller_without_a_valid_key_is_refused` | `tests/vault_e2e.rs:2631`, `no key: status`, left 200, right 401. |
+| Task 4, check removed | `caller_reads_only_its_entities_through_v2` | `tests/vault_e2e.rs:2631`, `v2 other entity: status`, left 200, right 403. |
+| Task 2, stub before the check | unit tests of `authorize_read` | stub returning `Ok(())`, `cargo test -j 4 --lib --features key_custodian caller_tests`: 3 passed, 5 failed (`authorize_read_refuses_a_missing_key` at `src/custom_extractors.rs:190`, `authorize_read_refuses_an_unknown_key` at `:198`, `authorize_read_refuses_an_unlisted_merchant` at `:211`, `authorize_read_with_an_empty_list_refuses_every_merchant` at `:224`, `authorize_read_needs_the_exact_key_hash` at `:238`); the three that passed test allowed reads and the masked `Debug`. With the check: 8 passed, with and without `key_custodian`. |
+| Task 4, check removed | unit tests of `authorize_read` | 3 passed, 5 failed: the same five refusal tests as with the stub (`src/custom_extractors.rs:212`, `:220`, `:233`, `:246`, `:260`, lines moved by the implementation). Restored with `git checkout -- src/custom_extractors.rs`; the three e2e tests pass again (3 passed). |
