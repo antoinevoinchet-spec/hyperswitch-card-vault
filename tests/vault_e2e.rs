@@ -2889,9 +2889,26 @@ async fn start_with_callers(db: &TestDb, keys: &Keys, callers: &[CallerSpec<'_>]
     vault
 }
 
-/// Rows of `locker`, `hash_table`, `vault` and `merchant`.
-fn row_counts(db: &TestDb) -> [i64; 4] {
-    ["locker", "hash_table", "vault", "merchant"].map(|table| db.count(table))
+/// Rows of `locker`, `hash_table`, `vault` and `merchant`, each with an MD5 of its whole content,
+/// so that a refusal that changes a row without adding or removing one is seen too.
+fn row_counts(db: &TestDb) -> [(i64, String); 4] {
+    ["locker", "hash_table", "vault", "merchant"].map(|table| {
+        let digest = diesel::sql_query(format!(
+            "SELECT md5(coalesce(string_agg(t::text, '|' ORDER BY t::text), '')) AS text FROM {table} t"
+        ))
+        .get_result::<TextRow>(&mut db.connection())
+        .expect("table digest")
+        .text;
+        (db.count(table), digest)
+    })
+}
+
+/// Number of audit rows of `operation` with a failure and `code`.
+fn refusals_in_audit(db: &TestDb, operation: &str, code: i16) -> usize {
+    audit_of(db, operation)
+        .iter()
+        .filter(|(_, outcome, status)| outcome == "failure" && *status == code)
+        .count()
 }
 
 fn add_body(merchant: &str, number: &str, reference: &str) -> serde_json::Value {
@@ -2976,6 +2993,7 @@ async fn caller_adds_only_for_its_merchants() {
     assert_eq!(status, 200, "the caller adds for its own merchant");
 
     for path in ["/data/add", "/cards/add"] {
+        let logged = refusals_in_audit(&db, "locker_add", 403);
         assert_refused_without_change(
             &vault,
             &db,
@@ -2986,9 +3004,10 @@ async fn caller_adds_only_for_its_merchants() {
             path,
         )
         .await;
-        assert!(
-            last_audit(&db, "locker_add") == audit("locker_add", "failure", 403),
-            "{path}: the refused add has no 403 audit row"
+        assert_eq!(
+            refusals_in_audit(&db, "locker_add", 403),
+            logged + 1,
+            "{path}: the refused add has no 403 audit row of its own"
         );
     }
 
@@ -3046,6 +3065,7 @@ async fn caller_deletes_only_its_merchants_cards() {
     );
 
     for path in ["/data/delete", "/cards/delete"] {
+        let logged = refusals_in_audit(&db, "locker_delete", 403);
         assert_refused_without_change(
             &vault,
             &db,
@@ -3056,9 +3076,10 @@ async fn caller_deletes_only_its_merchants_cards() {
             path,
         )
         .await;
-        assert!(
-            last_audit(&db, "locker_delete") == audit("locker_delete", "failure", 403),
-            "{path}: the refused delete has no 403 audit row"
+        assert_eq!(
+            refusals_in_audit(&db, "locker_delete", 403),
+            logged + 1,
+            "{path}: the refused delete has no 403 audit row of its own"
         );
     }
     let (status, body) = vault
