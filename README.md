@@ -116,6 +116,9 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/tokenization.md`: describes the per-caller rights on reads, adds and deletes and what they leave open; moved line references.
   - `docs/superpowers/specs/2026-11-24-per-caller-write-control-design.md` and `docs/superpowers/plans/2026-11-24-per-caller-write-control.md`: design and implementation plan, with the breakage runs.
   - `README.md`: this entry.
+- Two more open limits in the threat model (no code change):
+  - `docs/threat-model.md`: new open rows T39 (keys kept in a masking type that does not clear them from memory) and T40 (audit rows can be changed or deleted afterwards, nothing chains them).
+  - `README.md`: this entry.
 
 ## Demo
 
