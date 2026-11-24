@@ -3658,3 +3658,38 @@ async fn unknown_tenant_is_refused_on_every_data_route() {
     assert_eq!(status, 200, "known tenant");
     assert_card_number(&body, CARD_NUMBER, &reference);
 }
+
+/// T14: before both custodians have unlocked the tenant, every data route answers the lock error
+/// and writes no row; with one key only it is still locked; once unlocked, the same add succeeds.
+#[cfg(feature = "key_custodian")]
+#[tokio::test]
+async fn data_routes_are_refused_before_unlock() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+
+    let locked = r#"{"code":"TE_00","message":"Custodian is locked","data":null}"#;
+    let assert_locked = |step: &'static str| {
+        let vault = &vault;
+        async move {
+            for (path, body) in every_data_request("a-reference") {
+                let (status, response) = vault.post(&path, body).await;
+                assert_eq!((status, response.as_str()), (401, locked), "{path} {step}");
+            }
+        }
+    };
+    assert_locked("before any key").await;
+    assert_eq!(send_key(&vault, "key1", &keys.key1).await, 200, "key1");
+    assert_locked("with key 1 only").await;
+    assert_eq!(send_key(&vault, "key2", &keys.key2).await, 200, "key2");
+    assert_locked("with both keys, before decrypt").await;
+    assert_eq!(data_row_counts(&db), [0; 6], "no row written while locked");
+
+    let (status, _) = vault.post("/custodian/decrypt", serde_json::json!({})).await;
+    assert_eq!(status, 200, "decrypt");
+    let reference = store_card(&vault).await;
+    let (status, body) = vault.post("/data/retrieve", card_request(&reference)).await;
+    assert_eq!(status, 200, "retrieve once unlocked");
+    assert_card_number(&body, CARD_NUMBER, &reference);
+}
