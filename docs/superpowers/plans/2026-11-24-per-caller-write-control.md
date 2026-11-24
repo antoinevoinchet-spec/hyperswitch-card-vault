@@ -68,8 +68,9 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 - Produces: `DEFAULT_CALLER_KEY: std::sync::LazyLock<(String, String)>` (key, SHA-256), declared
   by `Vault::start_with_env` as caller `HARNESS` with rights `read,add,delete` and merchants
   `MERCHANT,MERCHANT_2,MERCHANT_3,MERCHANT_NO_CARD` plus every other merchant or entity id found by
-  reading the file (list them in the execution notes) — unless `extra` already holds a
-  `LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__` variable; `Vault::start_without_callers(db,
+  reading the file (list them in the execution notes), always, beside any caller in `extra` (its
+  key differs from theirs, so the T19 tests still read with their own key and store through
+  `post` with the harness key); `Vault::start_without_callers(db,
   master_key)`; `Vault::post` sends `x-vault-caller-key` = the default key when the vault declared
   it, `post_with_key` sends only the key it is given; `start_with_callers(db, keys,
   &[(name, key_hash, merchants, Option<rights>)])`; `fn row_counts(db) -> (i64, i64, i64, i64)`
@@ -77,7 +78,7 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 
 - [ ] **Step 1:** add the harness pieces above. Run the whole e2e file with `key_custodian`:
   expected 36 passed (the T19 tests keep their own caller, the others use the default one).
-- [ ] **Step 2:** write the six tests of the design, asserting with `assert_refusal` and
+- [ ] **Step 2:** write the seven tests of the design, asserting with `assert_refusal` and
   `audit_of`:
   - `caller_adds_only_for_its_merchants` (D2): callers `writer` (M1, `add`) and `other` (M2, all
     rights); add for M1 by `writer` 200; counts before; add for M2 by `writer`: exact 403; counts
@@ -88,14 +89,18 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
     unchanged (D8: the check runs before validation and before `find_or_create_entity`).
   - `caller_deletes_only_its_merchants_cards` (D3): `other` stores a card for M2; `writer` (M1,
     `delete`) deletes it: exact 403; counts equal; `other` reads it back 200 with the exact number;
-    `writer` deletes a random reference of M2: same exact 403; audit
+    `writer` deletes a random reference of M2: same exact 403; `writer` deletes a reference of a
+    merchant that never existed and is not listed: same exact 403 (D8: the check runs before the
+    merchant's key is looked up, so an unknown merchant answers like a refused one); audit
     `("locker_delete","failure",403)`; the same refused delete on `/cards/delete`: exact 403; a third caller `owner` (M1, all rights) stores a card for M1;
     `writer` deletes it 200, then `owner` reads it and gets 404.
   - `caller_without_a_valid_key_cannot_add_or_delete` (D4): add and delete with no key, then with
     a random key: exact 401 each, counts equal, four audit rows at 401.
   - `caller_adds_and_deletes_only_its_entities_through_v2` (D5): as D2 and D3 on
     `/api/v2/vault/add` and `/api/v2/vault/delete` with `entity_id`, counts equal, audit
-    `vault_add` / `vault_delete` at 403; a v2 add for an entity that never existed and is not
+    `vault_add` / `vault_delete` at 403; a v2 delete for an entity that never existed: same exact
+    403; a v2 add with `?mode=upsert` on the existing `vault_id` of an unlisted entity: exact 403,
+    and the entry read back by its owner unchanged, counts equal; a v2 add for an entity that never existed and is not
     listed, with a body `validate()` refuses: exact 403, `merchant` count unchanged (D8).
   - `caller_without_a_valid_key_cannot_add_or_delete_through_v2` (D5): as D4 on v2.
   - `caller_needs_the_right_for_each_operation` (D6): callers `reader` (M1, no `rights` variable),
@@ -175,7 +180,8 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 - [ ] **Step 0:** search `/data/`, `/cards/`, `/api/v2/vault/` in `.github/workflows`, `Makefile`,
   `scripts/`, `README.md`, `docs/` (read on 2026-11-24: in CI only `make demo` and the e2e tests
   call these routes; `docs/openapi*` and the Postman collection describe them, reported only).
-  If a caller outside the allowed files would break, stop and ask the owner.
+  An example call in `README.md` or `docs/tokenization.md` is updated to send
+  `x-vault-caller-key`; a caller outside the allowed files that would break: stop and ask the owner.
 - [ ] **Step 1:** `demo/run.sh`: `CALLER_KEY=$(openssl rand -hex 32)`, its hash with
   `printf '%s' "$CALLER_KEY" | openssl dgst -sha256 -r | cut -d' ' -f1`; pass
   `LOCKER__TENANT_SECRETS__PUBLIC__CALLERS__DEMO__KEY_HASH`, `…__MERCHANTS` (every merchant and
@@ -191,8 +197,10 @@ Branch: `feat/per-caller-write-control`. Status: written 2026-11-24, awaiting th
 ### Task 5: deliberate breakage
 **Couvre:** D6, D7, D11
 
-- [ ] **Step 1:** remove the four write calls of `authorize_caller` (no commit); run the six write
-  tests, both modes: each fails at the refusal's status. Restore with `git checkout --`.
+- [ ] **Step 1:** four runs, each with one write call of `authorize_caller` removed (v1 add, v1
+  delete, v2 add, v2 delete; no commit): run the six write tests, both modes, and record which test
+  fails at which line in each run; every run must turn at least one test red at a refusal
+  assertion of that route. Restore with `git checkout --` after each run.
 - [ ] **Step 2:** make the empty-`callers` branch return `Ok(())` (no commit); run
   `tenant_without_callers_refuses_every_data_call` and the unit tests, both modes: fail at the
   401. Restore; `git status` clean in `src/`; the seven tests pass again.
