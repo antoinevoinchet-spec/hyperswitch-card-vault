@@ -40,8 +40,8 @@ Add the entry under "Changes from the original". Run the checker. Commit.
 
 1. Compare the private note with the diff, line by line (D6).
 1b. Leak check on `git diff main` (design, plan, table, README): a case-insensitive search for the
-   checker's rule-12 words, the review report's folder name, the reviewed commit and the word
-   embargo finds nothing; a search for compliance, certification, audit or production-readiness
+   checker's rule-12 words, the review report's folder name, the reviewed commit and any
+   word on disclosure dates finds nothing; a search for compliance, certification, audit or production-readiness
    claims finds none (D4); `git check-ignore -v` confirms the private note's folder is ignored.
 2. `security-review` on the branch.
 3. A fresh Opus reviewer, run locally, given the owner's request, the private note, the diff and
