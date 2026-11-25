@@ -119,6 +119,13 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
 - Two more open limits in the threat model (no code change):
   - `docs/threat-model.md`: new open rows T39 (keys, among them the decrypted merchant keys, kept in a type that does not clear them from memory) and T40 (audit rows can be changed or deleted afterwards, nothing chains them).
   - `README.md`: this entry.
+- Tests for six controls that were in the code without a test (no change to the vault itself; rows T12, T14, T15, T16, T17 and T31 of the threat model are now proven):
+  - `tests/vault_e2e.rs`: end-to-end tests for the fingerprint key (T12), data routes refused before unlock (T14), unknown tenants refused (T15), the generated card reference (T17), and, under the `middleware` feature, JWE requests and responses (T16).
+  - `tests/dependency_policy.rs`: new tests that read `deny.toml` and the dependency workflow and fail if the policy is weakened (T31).
+  - `.github/workflows/CI-pr.yml`: a step in the end-to-end job runs the middleware tests.
+  - `docs/threat-model.md`: the six rows moved to proven, with their tests and what they do not cover; the commands to run them.
+  - `docs/superpowers/specs/2026-11-25-untested-controls-design.md` and `docs/superpowers/plans/2026-11-25-untested-controls.md`: design and plan, with each deliberate breakage and its failing line.
+  - `README.md`: this entry.
 
 ## Demo
 
