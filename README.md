@@ -4,6 +4,7 @@
 > **Unofficial fork — study project.** This is a personal fork of [juspay/hyperswitch-card-vault](https://github.com/juspay/hyperswitch-card-vault). It is not affiliated with or endorsed by Juspay.
 > This code is not audited and not PCI DSS compliant: do not use in production, and never store real card or personal data in it.
 > Development on this fork is done with an AI coding assistant (Claude Code).
+> No human cryptography expert has reviewed this fork: its changes, tests and threat model were written and reviewed by AI models only.
 
 ## About this fork
 
@@ -11,8 +12,8 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
 
 ### Changes from the original
 
-- `README.md`: added this notice and section; reworded the overview so that it makes no compliance claim.
-- `CLAUDE.md`: added working rules for the AI coding assistant.
+- `README.md`: added this notice and section, including the statement that no human cryptography expert has reviewed this fork; reworded the overview so that it makes no compliance claim.
+- `CLAUDE.md`: added working rules for the AI coding assistant, and the commands observed on the maintainer's machine (including how `cargo` is found on the PATH).
 - `.github/workflows/CI-pr.yml`: removed the steps that used the upstream bot's secrets to push automatic formatting and `Cargo.lock` fixes; formatting and `Cargo.lock` are now checked only, and the workflow token is read-only.
 - Audit log (one metadata-only entry per vault operation, written to a new `audit_log` table; an operation whose entry cannot be written returns an error):
   - `src/audit.rs`: new module with the entry types, the append-only sink trait, the fail-closed `record` function and its tests.

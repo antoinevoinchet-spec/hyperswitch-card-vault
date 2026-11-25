@@ -15,7 +15,7 @@ Public, unofficial fork of `juspay/hyperswitch-card-vault`, maintained by `antoi
 
 ## Observed commands (20/11/2026, Rust 1.100.0, Mac M2 with 8 GB)
 
-- Rust is installed by Homebrew but not on the PATH. Before `cargo`, run `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"`.
+- Rust is installed by Homebrew. Since 24/11/2026, `~/.zprofile` puts it on the PATH of a login terminal opened after that date. The Claude Code shell does not read `~/.zprofile` (`cargo not found` on 25/11/2026), so before `cargo` in it, run `export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"`.
 - Build: `cargo build -j 4` → exit code 0, 9 min 20 s for a cold build.
 - Tests: `cargo test -j 4` → exit code 0, 18 tests passed, without PostgreSQL or Redis.
 - The original CI also runs `cargo nextest run --profile ci --all-features`, `cargo clippy --all-features --all-targets` and `cargo +nightly fmt --all --check`. These commands were not run here: nextest and the nightly toolchain are not installed.
