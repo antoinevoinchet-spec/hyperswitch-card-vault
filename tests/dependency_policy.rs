@@ -96,7 +96,9 @@ fn deny_policy_lists_each_vulnerability_exception_with_reason_and_expiry() {
         .map(str::trim)
         .filter(|line| line.starts_with("{ id = "))
         .collect();
-    assert!(!entries.is_empty(), "the exceptions are read");
+    // The 48 entries read from the first run of the check (row T32): a new exception, even in the
+    // right form, must change this test.
+    assert_eq!(entries.len(), 48, "number of vulnerability exceptions");
     for entry in &entries {
         assert!(entry.contains("id = \"RUSTSEC-"), "named entry: {entry}");
         assert!(entry.contains("reason = \""), "reason: {entry}");
@@ -106,9 +108,18 @@ fn deny_policy_lists_each_vulnerability_exception_with_reason_and_expiry() {
         .iter()
         .filter(|line| line.contains("RUSTSEC-") || line.contains("GHSA-"))
         .count();
-    assert_eq!(ignore_lines, entries.len(), "every exception has the form above");
+    assert_eq!(
+        ignore_lines,
+        entries.len(),
+        "every exception has the form above"
+    );
     let section_text = section(&deny, "advisories").join("\n");
-    for weakening in ["vulnerability", "notice", "db-urls", "git-fetch-with-cli = false"] {
+    for weakening in [
+        "vulnerability",
+        "notice",
+        "db-urls",
+        "git-fetch-with-cli = false",
+    ] {
         assert!(
             !section_text.contains(weakening),
             "no override of the default refusal: {weakening}"
@@ -126,15 +137,33 @@ fn dependency_workflow_runs_on_every_pull_request_main_and_weekly() {
         .take_while(|line| line.is_empty() || line.starts_with(' ') || line.starts_with('#'))
         .collect();
     let on = on.join("\n");
-    assert!(on.contains("\n  pull_request:") || on.starts_with("  pull_request:"), "pull_request");
-    assert!(on.contains("  push:\n    branches:\n      - main"), "push to main");
-    assert!(on.contains("  schedule:\n    - cron: "), "weekly schedule");
+    // `pull_request:` with nothing under it: every pull request, whatever its branch or files.
+    assert!(
+        on.lines()
+            .zip(on.lines().skip(1))
+            .any(|(line, next)| line == "  pull_request:" && !next.starts_with("    ")),
+        "pull_request without a filter"
+    );
+    assert!(
+        on.contains("  push:\n    branches:\n      - main"),
+        "push to main"
+    );
+    assert!(
+        on.contains("  schedule:\n    - cron: \"17 5 * * 1\""),
+        "weekly schedule, Mondays at 05:17 UTC"
+    );
     assert!(
         !on.contains("paths") && !on.contains("branches-ignore"),
         "no filter that skips a pull request"
     );
-    assert!(!workflow.contains("continue-on-error"), "a failure fails the job");
-    assert!(!workflow.contains("if:"), "no step or job is skipped by a condition");
+    assert!(
+        !workflow.contains("continue-on-error"),
+        "a failure fails the job"
+    );
+    assert!(
+        !workflow.contains("if:"),
+        "no step or job is skipped by a condition"
+    );
     assert!(
         workflow
             .lines()
