@@ -24,8 +24,8 @@ Design: `docs/superpowers/specs/2026-11-25-untested-controls-design.md`. Branch:
   count of `GHSA` and `advisories` in those three files is 0, and no compliance wording.
 - CI coverage (read in `.github/workflows/CI-pr.yml`): the end-to-end job runs
   `cargo test --features key_custodian --test vault_e2e` (T12, T14, T15, T17); the test job runs
-  `cargo nextest run --all-features` (picks up `tests/dependency_policy.rs`, T31). No job runs the
-  `middleware_` tests (T16).
+  `cargo nextest run --all-features` (picks up `tests/dependency_policy.rs`, T31). No job ran the
+  `middleware_` tests (T16) before this task; the owner accepted a CI step (see the notes).
 - Branch name `test/t3-untested-controls` is the one the owner's brief names.
 
 ## Review Focus
@@ -162,4 +162,49 @@ log line, nothing else. Report the stale "UUID v4" doc comment of `src/storage/u
 
 ## Execution notes
 
-_Filled in during execution: each green run, each breakage and its failing line, each restore._
+All runs on 2026-11-25 against a local PostgreSQL 14 (port 54330) with `VAULT_TEST_REQUIRE_DB=1`,
+`--features key_custodian` unless stated. After each breakage, `git checkout` of the file and
+`git diff --stat src/` empty. Ids and references are masked below.
+
+- T15: green. Breakage of Task 1. Red:
+  `assertion left == right failed: /data/add with tenant Some("no-such-tenant")`,
+  `left: (401, {"code":"TE_00","message":"Custodian is locked","data":null})`,
+  `right: (400, {"code":"TE_03","message":"Tenant error: Invalid x-tenant-id","data":null})`.
+  Restored, green.
+- T14: green. The breakage of Task 2 did not compile at first (`TenantConfig` is imported only
+  without the custodian feature); a compile error does not count. Used: the same patch plus the
+  import made unconditional (`#[cfg(not(feature = "key_custodian"))]` above
+  `use crate::config::TenantConfig;` replaced by `#[cfg(all())]`). The vault started; red:
+  `assertion left == right failed: /data/add before any key`,
+  `left: (500, {"code":"TE_02","message":"Failed while getting merchant from DB","data":null})`,
+  `right: (401, ... "Custodian is locked" ...)`: the request reached the database before unlock.
+  Restored, green.
+- T17: green. Breakage of Task 3. Red: `assertion left == right failed: version 7: <uuid>`,
+  `left: 8`, `right: 7`. Restored, green.
+- T12: green. Breakage of Task 4 (compiles: `HmacSha512::new` takes a `Secret<Vec<u8>>`). Red:
+  `assertion left != right failed: two keys, two fingerprints`, `left: "<id>"`, `right: "<id>"`.
+  Restored, green.
+- T16 (`--features key_custodian,middleware`, filtered on `middleware_`): green, 2 passed.
+  - Response in clear (patch of Task 5): `middleware_requests_and_responses_are_jwe` red at
+    `assert!(!body.contains("card_reference"), "add response not in clear")`.
+  - Path check of `wants_jws_response` removed: the same test red at `.expect("JWE field")` in
+    `open_response` (the retrieve response was a signed-only JWS).
+  - Request signature not verified (in `src/crypto/encryption_manager/managers/jw.rs`,
+    `verify_sign` replaced by a base64 decode of the JWS payload; the first version did not
+    compile and does not count): `middleware_refuses_plain_and_forged_requests` red with
+    `signed with another key: refused, got 200`.
+  - Restored, green.
+  - The owner accepted a CI step on 2026-11-25 (decision A): `.github/workflows/CI-pr.yml`, job
+    "End-to-end tests and demo against PostgreSQL", step "Run the JWE middleware tests", which
+    also checks that exactly 2 tests passed.
+- T31 (`cargo test -j 4 --test dependency_policy`): green, 4 passed.
+  - `unknown-git = "allow"` in `deny.toml`: `deny_policy_checks_every_feature_and_every_source`
+    red at `sources: unknown-git = "deny"`.
+  - `  pull_request:` removed from `.github/workflows/dependencies.yml`:
+    `dependency_workflow_runs_on_every_pull_request_main_and_weekly` red at `pull_request`.
+  - Restored (`git diff --stat` empty), green.
+- Table: `scripts/check-threat-model.sh` → `OK: 40 rows (24 proven, 0 not tested, 16 open)`. The
+  first run refused `src/tenant.rs:145-151` (blank last line); fixed to `145-150`.
+  `docs/tokenization.md` references still point at the right code: unchanged.
+- Note: the CI test job (`cargo nextest run --all-features`) also builds the `middleware_` tests;
+  without a database URL they print "skipped" and pass, as every end-to-end test does there.

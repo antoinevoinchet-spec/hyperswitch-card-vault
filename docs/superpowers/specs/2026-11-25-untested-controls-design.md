@@ -27,7 +27,7 @@ patch, and do not call a row `proven` when its test never runs in CI.
   until `/custodian/decrypt` inserts the state. Every data route resolves the tenant through
   `TenantStateResolver` (`src/custom_extractors.rs:21-33`).
 - T15: `TenantStateResolver` refuses a missing header and calls `is_known_tenant`
-  (`src/custom_extractors.rs:25-31`, `src/tenant.rs:145-151`): HTTP 400, `TE_03`,
+  (`src/custom_extractors.rs:25-31`, `src/tenant.rs:145-150`): HTTP 400, `TE_03`,
   `Tenant error: Invalid x-tenant-id`. Behind it, an unknown tenant also has no state (401), so the
   test must tell the two refusals apart by their body.
 - T16: with `middleware`, a layer over `/data`, `/cards`, `/api/v2/vault` and `/entity`
