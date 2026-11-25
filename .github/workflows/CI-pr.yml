@@ -196,6 +196,19 @@ jobs:
           VAULT_TEST_REQUIRE_DB: "1"
         run: cargo test --features key_custodian --test vault_e2e
 
+      # Threat T16. Only the middleware tests run under this feature: the others send plain JSON.
+      - name: Run the JWE middleware tests
+        shell: bash
+        env:
+          VAULT_TEST_DATABASE_URL: postgres://postgres@localhost:5432/postgres
+          # Fails the tests instead of skipping them if the URL above goes missing.
+          VAULT_TEST_REQUIRE_DB: "1"
+        # The count is fixed on purpose, so a filter that matches no test cannot pass: update it
+        # when a middleware test is added or gated.
+        run: |
+          cargo test --features key_custodian,middleware --test vault_e2e middleware_ 2>&1 | tee test-output.txt
+          grep -q 'test result: ok. 2 passed' test-output.txt || { echo "::error::expected 2 middleware tests"; exit 1; }
+
       - name: Create the demo database
         shell: bash
         run: psql postgres://postgres@localhost:5432/postgres -c 'CREATE DATABASE demo'

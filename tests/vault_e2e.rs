@@ -3550,3 +3550,616 @@ async fn tenant_without_callers_refuses_every_data_call() {
         "the refused v2 delete has no 401 audit row"
     );
 }
+
+// Controls that were in the code without a test (task T3: T12, T14, T15, T16, T17), see
+// `docs/superpowers/specs/2026-11-25-untested-controls-design.md`.
+
+impl Vault {
+    /// Posts `body` with the harness caller's key and `tenant` as `x-tenant-id` (no header when
+    /// `None`).
+    async fn post_as_tenant(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+        tenant: Option<&str>,
+    ) -> (u16, String) {
+        let mut request = self.client.post(format!("{}{path}", self.base)).json(&body);
+        if let Some(tenant) = tenant {
+            request = request.header("x-tenant-id", tenant);
+        }
+        if let Some(key) = &self.caller_key {
+            request = request.header("x-vault-caller-key", key);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("response body"))
+    }
+}
+
+/// Row counts of every table a data route writes: locker, hash, merchant, fingerprint, vault and
+/// entity.
+fn data_row_counts(db: &TestDb) -> [i64; 6] {
+    [
+        "locker",
+        "hash_table",
+        "merchant",
+        "fingerprint",
+        "vault",
+        "entity",
+    ]
+    .map(|table| db.count(table))
+}
+
+/// `text` with every run of 13 or more digits replaced, so that a failure never prints a card
+/// number.
+fn mask_card_numbers(text: &str) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            run.push(c);
+            continue;
+        }
+        out.push_str(if run.len() >= 13 { "<digits>" } else { &run });
+        run.clear();
+        out.push(c);
+    }
+    out.pop();
+    out
+}
+
+/// One request for each data route: v1 under `/data` and `/cards`, v2, and `/entity`.
+fn every_data_request(reference: &str) -> Vec<(String, serde_json::Value)> {
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let fingerprint = serde_json::json!({ "data": CARD_NUMBER, "key": "fingerprint-test-key" });
+    let v2_ref = serde_json::json!({ "entity_id": MERCHANT, "vault_id": reference });
+    let mut requests = Vec::new();
+    for prefix in ["/data", "/cards"] {
+        requests.push((format!("{prefix}/add"), add.clone()));
+        requests.push((format!("{prefix}/retrieve"), card_request(reference)));
+        requests.push((format!("{prefix}/delete"), card_request(reference)));
+        requests.push((format!("{prefix}/fingerprint"), fingerprint.clone()));
+    }
+    requests.push((
+        "/api/v2/vault/add".to_string(),
+        serde_json::json!({
+            "entity_id": MERCHANT,
+            "vault_id": reference,
+            "data": { "card_number": CARD_NUMBER },
+            "ttl": null
+        }),
+    ));
+    requests.push(("/api/v2/vault/retrieve".to_string(), v2_ref.clone()));
+    requests.push(("/api/v2/vault/delete".to_string(), v2_ref));
+    requests.push(("/api/v2/vault/fingerprint".to_string(), fingerprint));
+    requests.push((
+        "/entity".to_string(),
+        serde_json::json!({ "entity_id": MERCHANT }),
+    ));
+    requests
+}
+
+/// T15: a tenant id that is not configured, or no tenant id, is refused on every data route
+/// before any row is read or written, with the tenant error and not the lock error.
+#[tokio::test]
+async fn unknown_tenant_is_refused_on_every_data_route() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let reference = store_card(&vault).await;
+    let before = data_row_counts(&db);
+
+    let unknown = r#"{"code":"TE_03","message":"Tenant error: Invalid x-tenant-id","data":null}"#;
+    let missing = r#"{"code":"TE_03","message":"Tenant error: x-tenant-id not found in headers","data":null}"#;
+    for tenant in [Some("no-such-tenant"), Some("PUBLIC"), Some(""), None] {
+        for (path, body) in every_data_request(&reference) {
+            let (status, response) = vault.post_as_tenant(&path, body, tenant).await;
+            let expected = if tenant.is_some() { unknown } else { missing };
+            assert_eq!(
+                (status, mask_card_numbers(&response).as_str()),
+                (400, expected),
+                "{path} with tenant {tenant:?}"
+            );
+        }
+    }
+    #[cfg(feature = "key_custodian")]
+    {
+        let (status, response) = vault
+            .post_as_tenant(
+                "/custodian/key1",
+                serde_json::json!({ "key": keys.key1 }),
+                Some("no-such-tenant"),
+            )
+            .await;
+        assert_eq!(
+            (status, mask_card_numbers(&response).as_str()),
+            (400, unknown),
+            "custodian key"
+        );
+    }
+
+    assert_eq!(data_row_counts(&db), before, "no row written");
+    // The configured tenant still reads its card.
+    let (status, body) = vault.post("/data/retrieve", card_request(&reference)).await;
+    assert_eq!(status, 200, "known tenant");
+    assert_card_number(&body, CARD_NUMBER, &reference);
+}
+
+/// T14: before both custodians have unlocked the tenant, every data route answers the lock error
+/// and writes no row; with one key only it is still locked; once unlocked, the same add succeeds.
+#[cfg(feature = "key_custodian")]
+#[tokio::test]
+async fn data_routes_are_refused_before_unlock() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+
+    let locked = r#"{"code":"TE_00","message":"Custodian is locked","data":null}"#;
+    let assert_locked = |step: &'static str| {
+        let vault = &vault;
+        async move {
+            for (path, body) in every_data_request("a-reference") {
+                let (status, response) = vault.post(&path, body).await;
+                assert_eq!(
+                    (status, mask_card_numbers(&response).as_str()),
+                    (401, locked),
+                    "{path} {step}"
+                );
+            }
+        }
+    };
+    assert_locked("before any key").await;
+    assert_eq!(send_key(&vault, "key1", &keys.key1).await, 200, "key1");
+    assert_locked("with key 1 only").await;
+    assert_eq!(send_key(&vault, "key2", &keys.key2).await, 200, "key2");
+    assert_locked("with both keys, before decrypt").await;
+    assert_eq!(data_row_counts(&db), [0; 6], "no row written while locked");
+
+    let (status, _) = vault
+        .post("/custodian/decrypt", serde_json::json!({}))
+        .await;
+    assert_eq!(status, 200, "decrypt");
+    let reference = store_card(&vault).await;
+    let (status, body) = vault.post("/data/retrieve", card_request(&reference)).await;
+    assert_eq!(status, 200, "retrieve once unlocked");
+    assert_card_number(&body, CARD_NUMBER, &reference);
+}
+
+/// T17: a card reference the vault generates is an RFC 9562 UUID version 7 (version and variant
+/// bits, a timestamp of now), unique, and holds no card number; a reference the
+/// caller supplies is kept as is.
+#[tokio::test]
+async fn generated_card_reference_is_a_uuid_v7() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+
+    let now_ms = || {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after 1970")
+                .as_millis(),
+        )
+        .expect("milliseconds fit in u64")
+    };
+    let start = now_ms();
+    let mut references = Vec::new();
+    for (customer, number) in [
+        (CUSTOMER, CARD_NUMBER),
+        (CUSTOMER_2, CARD_2),
+        (CUSTOMER, CARD_2),
+    ] {
+        let response = store_card_as(&vault, MERCHANT, customer, number).await;
+        references.push(
+            response["payload"]["card_reference"]
+                .as_str()
+                .expect("card_reference")
+                .to_string(),
+        );
+    }
+    let end = now_ms();
+
+    for reference in &references {
+        assert_eq!(reference.len(), 36, "hyphenated form: {reference}");
+        let uuid = uuid::Uuid::parse_str(reference).expect("a UUID");
+        let bytes = uuid.as_bytes();
+        assert_eq!(bytes[6] >> 4, 0b0111, "version 7: {reference}");
+        assert_eq!(bytes[8] >> 6, 0b10, "RFC 9562 variant: {reference}");
+        let mut ms = [0u8; 8];
+        ms[2..].copy_from_slice(&bytes[..6]);
+        let ms = u64::from_be_bytes(ms);
+        assert!(
+            (start.saturating_sub(5_000)..=end + 5_000).contains(&ms),
+            "timestamp of the add: {reference}"
+        );
+        let digits: String = reference.chars().filter(char::is_ascii_digit).collect();
+        assert!(
+            !digits.contains(CARD_NUMBER) && !digits.contains(CARD_2),
+            "no card number in {reference}"
+        );
+    }
+    let mut unique = references.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), references.len(), "each reference is new");
+    let stored: Vec<String> = db
+        .locker_rows()
+        .into_iter()
+        .map(|row| row.locker_id)
+        .collect();
+    for reference in &references {
+        assert!(stored.contains(reference), "stored under {reference}");
+    }
+
+    let supplied =
+        store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "caller-ref-1").await;
+    assert_eq!(
+        supplied["payload"]["card_reference"], "caller-ref-1",
+        "supplied reference kept"
+    );
+}
+
+/// T12: the fingerprint is keyed by the key the caller sends. The same card under two keys gets
+/// two fingerprints and two rows; the same card under the same key gets the same one, also in a
+/// batch. Nothing here computes or compares a hash: only the fingerprint ids are compared.
+#[tokio::test]
+async fn fingerprint_differs_for_two_caller_keys() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let vault = Vault::start(&db, &keys.master_key).await;
+    unlock(&vault, &keys).await;
+    let key_a = hex::encode(random_bytes(32));
+    let key_b = hex::encode(random_bytes(32));
+
+    let fingerprint = |key: String, data: &'static str| {
+        let vault = &vault;
+        async move {
+            let (status, body) = vault
+                .post(
+                    "/data/fingerprint",
+                    serde_json::json!({ "data": data, "key": key }),
+                )
+                .await;
+            assert_eq!(status, 200, "fingerprint");
+            assert!(!body.contains(data), "no card number in the response");
+            let body: serde_json::Value = serde_json::from_str(&body).expect("fingerprint JSON");
+            body["fingerprint_id"]
+                .as_str()
+                .expect("fingerprint_id")
+                .to_string()
+        }
+    };
+    let a = fingerprint(key_a.clone(), CARD_NUMBER).await;
+    let b = fingerprint(key_b.clone(), CARD_NUMBER).await;
+    assert_ne!(a, b, "two keys, two fingerprints");
+    assert_eq!(
+        fingerprint(key_a.clone(), CARD_NUMBER).await,
+        a,
+        "same key, same fingerprint"
+    );
+    assert_eq!(
+        fingerprint(key_b.clone(), CARD_NUMBER).await,
+        b,
+        "same key, same fingerprint"
+    );
+    assert_ne!(
+        fingerprint(key_a.clone(), CARD_2).await,
+        a,
+        "another card, another fingerprint"
+    );
+    assert_eq!(db.count("fingerprint"), 3, "one row per key and card");
+
+    let (status, body) = vault
+        .post(
+            "/data/fingerprint",
+            serde_json::json!({ "batch_data": [
+                { "label": "a", "data": CARD_NUMBER, "key": key_a },
+                { "label": "b", "data": CARD_NUMBER, "key": key_b },
+            ] }),
+        )
+        .await;
+    assert_eq!(status, 200, "batch fingerprint");
+    let body: serde_json::Value = serde_json::from_str(&body).expect("batch JSON");
+    assert_eq!(body["fingerprints"]["a"], a.as_str(), "batch, key a");
+    assert_eq!(body["fingerprints"]["b"], b.as_str(), "batch, key b");
+    assert_eq!(db.count("fingerprint"), 3, "no new row");
+}
+
+// T16: the JWE middleware. Run with `--features key_custodian,middleware` and filtered on
+// `middleware_`: under that feature, every other test of this file sends plain JSON and is refused.
+// The client below uses `josekit` directly, not the vault's own `JWEncryption`.
+
+/// Two RSA 2048 key pairs made for one test, as PEM: the locker's and the tenant's. Never printed.
+#[cfg(feature = "middleware")]
+struct JweKeys {
+    locker_private: String,
+    locker_public: String,
+    tenant_private: String,
+    tenant_public: String,
+}
+
+#[cfg(feature = "middleware")]
+fn rsa_pair() -> (String, String) {
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey};
+    let private = rsa::RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).expect("RSA key");
+    let public = rsa::RsaPublicKey::from(&private);
+    (
+        private
+            .to_pkcs8_pem(Default::default())
+            .expect("private PEM")
+            .to_string(),
+        public
+            .to_public_key_pem(Default::default())
+            .expect("public PEM"),
+    )
+}
+
+#[cfg(feature = "middleware")]
+impl JweKeys {
+    fn generate() -> Self {
+        let (locker_private, locker_public) = rsa_pair();
+        let (tenant_private, tenant_public) = rsa_pair();
+        Self {
+            locker_private,
+            locker_public,
+            tenant_private,
+            tenant_public,
+        }
+    }
+
+    /// What a tenant application sends: `payload` signed with `signing_key` (RS256), wrapped as
+    /// JSON and encrypted to the locker key with `alg` and A256GCM, as the `JweBody` fields.
+    fn request(
+        &self,
+        payload: &serde_json::Value,
+        signing_key: &str,
+        alg: &josekit::jwe::alg::rsaes::RsaesJweAlgorithm,
+    ) -> serde_json::Value {
+        let signer = josekit::jws::RS256
+            .signer_from_pem(signing_key.as_bytes())
+            .expect("signer");
+        let jws = josekit::jws::serialize_compact(
+            payload.to_string().as_bytes(),
+            &josekit::jws::JwsHeader::new(),
+            &signer,
+        )
+        .expect("sign request");
+        let mut parts = jws.split('.');
+        let jws_body = serde_json::json!({
+            "header": parts.next().expect("JWS header"),
+            "payload": parts.next().expect("JWS payload"),
+            "signature": parts.next().expect("JWS signature"),
+        });
+        let encrypter = alg
+            .encrypter_from_pem(self.locker_public.as_bytes())
+            .expect("encrypter");
+        let mut header = josekit::jwe::JweHeader::new();
+        header.set_content_encryption("A256GCM");
+        let jwe =
+            josekit::jwe::serialize_compact(jws_body.to_string().as_bytes(), &header, &encrypter)
+                .expect("encrypt request");
+        let parts: Vec<&str> = jwe.split('.').collect();
+        assert_eq!(parts.len(), 5, "compact JWE");
+        serde_json::json!({
+            "header": parts[0],
+            "encryptedKey": parts[1],
+            "iv": parts[2],
+            "encryptedPayload": parts[3],
+            "tag": parts[4],
+        })
+    }
+
+    /// The payload of a JWE response: decrypted with the tenant key (RSA-OAEP), then its inner JWS
+    /// verified with the locker key. Fails if the body is not such an envelope.
+    fn open_response(&self, body: &str) -> serde_json::Value {
+        let envelope: serde_json::Value = serde_json::from_str(body).expect("response JSON");
+        let field = |name: &str| envelope[name].as_str().expect("JWE field").to_string();
+        let compact = [
+            field("header"),
+            field("encryptedKey"),
+            field("iv"),
+            field("encryptedPayload"),
+            field("tag"),
+        ]
+        .join(".");
+        let decrypter = josekit::jwe::RSA_OAEP
+            .decrypter_from_pem(self.tenant_private.as_bytes())
+            .expect("decrypter");
+        let (jws_json, _) =
+            josekit::jwe::deserialize_compact(&compact, &decrypter).expect("decrypt response");
+        let jws: serde_json::Value = serde_json::from_slice(&jws_json).expect("inner JWS JSON");
+        self.verify_jws(&jws)
+    }
+
+    /// The payload of a `{header, payload, signature}` JWS, verified with the locker key.
+    fn verify_jws(&self, jws: &serde_json::Value) -> serde_json::Value {
+        let part = |name: &str| jws[name].as_str().expect("JWS field").to_string();
+        let compact = [part("header"), part("payload"), part("signature")].join(".");
+        let verifier = josekit::jws::RS256
+            .verifier_from_pem(self.locker_public.as_bytes())
+            .expect("verifier");
+        let (payload, _) =
+            josekit::jws::deserialize_compact(&compact, &verifier).expect("verify response");
+        serde_json::from_slice(&payload).expect("response payload JSON")
+    }
+}
+
+#[cfg(feature = "middleware")]
+async fn start_with_jwe(db: &TestDb, keys: &Keys, jwe: &JweKeys) -> Vault {
+    let vault = Vault::start_with_env(
+        db,
+        &keys.master_key,
+        &[
+            (
+                "LOCKER__SECRETS__LOCKER_PRIVATE_KEY",
+                jwe.locker_private.as_str(),
+            ),
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__PUBLIC_KEY",
+                jwe.tenant_public.as_str(),
+            ),
+        ],
+    )
+    .await;
+    unlock(&vault, keys).await;
+    vault
+}
+
+#[cfg(feature = "middleware")]
+impl Vault {
+    /// Posts a JWE envelope with the harness caller's key and optional extra headers.
+    async fn post_jwe(
+        &self,
+        path: &str,
+        envelope: serde_json::Value,
+        extra: &[(&str, &str)],
+    ) -> (u16, String) {
+        let mut request = self
+            .client
+            .post(format!("{}{path}", self.base))
+            .header("x-tenant-id", "public")
+            .json(&envelope);
+        if let Some(key) = &self.caller_key {
+            request = request.header("x-vault-caller-key", key);
+        }
+        for (name, value) in extra {
+            request = request.header(*name, *value);
+        }
+        let response = request.send().await.expect("send request");
+        let status = response.status().as_u16();
+        (status, response.text().await.expect("response body"))
+    }
+}
+
+/// T16: a card is added and read back through the middleware; neither raw response body holds the
+/// card number or the reference in clear; asking for a signed-only response on retrieve still
+/// gets a JWE.
+#[cfg(feature = "middleware")]
+#[tokio::test]
+async fn middleware_requests_and_responses_are_jwe() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let jwe = JweKeys::generate();
+    let vault = start_with_jwe(&db, &keys, &jwe).await;
+
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let (status, body) = vault
+        .post_jwe(
+            "/data/add",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "JWE add");
+    assert!(
+        !body.contains("card_reference"),
+        "add response not in clear"
+    );
+    let added = jwe.open_response(&body);
+    let reference = added["payload"]["card_reference"]
+        .as_str()
+        .expect("card_reference")
+        .to_string();
+    assert!(!body.contains(&reference), "reference not in clear");
+    assert_eq!(db.count("locker"), 1, "one card stored");
+
+    for extra in [&[][..], &[("x-fp-response-encoding", "jws")][..]] {
+        let (status, body) = vault
+            .post_jwe(
+                "/data/retrieve",
+                jwe.request(
+                    &card_request(&reference),
+                    &jwe.tenant_private,
+                    &josekit::jwe::RSA_OAEP_256,
+                ),
+                extra,
+            )
+            .await;
+        assert_eq!(status, 200, "JWE retrieve {extra:?}");
+        assert!(
+            !body.contains(CARD_NUMBER),
+            "card number not in clear {extra:?}"
+        );
+        assert!(
+            !body.contains("card_number"),
+            "payload not in clear {extra:?}"
+        );
+        let opened = jwe.open_response(&body);
+        assert!(
+            opened["payload"]["card"]["card_number"].as_str() == Some(CARD_NUMBER),
+            "the decrypted response holds the stored card {extra:?}"
+        );
+    }
+}
+
+/// T16: a plain JSON body, a body signed with a key the vault does not know, a body whose tag was
+/// altered and a body encrypted with another key-wrapping algorithm are each refused, and none
+/// writes a row.
+#[cfg(feature = "middleware")]
+#[tokio::test]
+async fn middleware_refuses_plain_and_forged_requests() {
+    let Some(admin) = admin_url() else { return };
+    let db = TestDb::create(&admin);
+    let keys = Keys::generate();
+    let jwe = JweKeys::generate();
+    let vault = start_with_jwe(&db, &keys, &jwe).await;
+    let (other_private, _) = rsa_pair();
+
+    let add = serde_json::json!({
+        "merchant_id": MERCHANT,
+        "merchant_customer_id": CUSTOMER,
+        "card": { "card_number": CARD_NUMBER }
+    });
+    let mut altered = jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256);
+    let tag = altered["tag"].as_str().expect("tag").to_string();
+    let flipped = if tag.starts_with('A') { "B" } else { "A" };
+    altered["tag"] = serde_json::Value::String(format!("{flipped}{}", &tag[1..]));
+
+    let cases = [
+        ("plain JSON", add.clone()),
+        (
+            "signed with another key",
+            jwe.request(&add, &other_private, &josekit::jwe::RSA_OAEP_256),
+        ),
+        ("altered tag", altered),
+        (
+            "RSA-OAEP instead of RSA-OAEP-256",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP),
+        ),
+    ];
+    for (case, envelope) in cases {
+        let (status, body) = vault.post_jwe("/data/add", envelope, &[]).await;
+        assert!(
+            (400..500).contains(&status),
+            "{case}: refused, got {status}"
+        );
+        assert!(!body.contains("card_reference"), "{case}: nothing stored");
+    }
+    assert_eq!(data_row_counts(&db), [0; 6], "no row written");
+
+    // The control case: the same add, correctly encrypted and signed, is accepted.
+    let (status, _) = vault
+        .post_jwe(
+            "/data/add",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+            &[],
+        )
+        .await;
+    assert_eq!(status, 200, "valid JWE add");
+}
