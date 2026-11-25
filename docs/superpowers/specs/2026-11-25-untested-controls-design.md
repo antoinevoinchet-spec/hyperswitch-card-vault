@@ -23,7 +23,7 @@ patch, and do not call a row `proven` when its test never runs in CI.
   (`src/routes/data.rs:342-353`), single or batch. Only the primitive is unit-tested.
 - T14: with `key_custodian`, `GlobalAppState::new` starts with no tenant state
   (`src/tenant.rs:88-92`); `get_app_state_of_tenant` (`src/tenant.rs:133-143`) answers
-  `CustodianLocked` (HTTP 401, `{"error_code":"TE_00","error_message":"Custodian is locked"}`)
+  `CustodianLocked` (HTTP 401, `{"code":"TE_00","message":"Custodian is locked","data":null}`)
   until `/custodian/decrypt` inserts the state. Every data route resolves the tenant through
   `TenantStateResolver` (`src/custom_extractors.rs:21-33`).
 - T15: `TenantStateResolver` refuses a missing header and calls `is_known_tenant`

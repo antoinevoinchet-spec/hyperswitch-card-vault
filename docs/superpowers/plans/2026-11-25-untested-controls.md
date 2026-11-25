@@ -208,3 +208,24 @@ All runs on 2026-11-25 against a local PostgreSQL 14 (port 54330) with `VAULT_TE
   `docs/tokenization.md` references still point at the right code: unchanged.
 - Note: the CI test job (`cargo nextest run --all-features`) also builds the `middleware_` tests;
   without a database URL they print "skipped" and pass, as every end-to-end test does there.
+
+### After the reviews (2026-11-25)
+
+Second opinion (gpt-6.2-sol) and a fresh Opus review. Applied, each re-run green:
+
+- Failures never print a card number: T14 and T15 compare response bodies with runs of 13 or
+  more digits masked; T16 compares the decrypted number with `assert!` and a fixed message.
+- T31 tightened, each new assertion seen red then green:
+  - `pull_request:` followed by `    branches: [release]`: red at `pull_request without a filter`;
+  - one more exception in the right form: red at `number of vulnerability exceptions`;
+  - cron changed to once a year: red at `weekly schedule, Mondays at 05:17 UTC`.
+- Row T17 says the random bits are not measured; the table header no longer ties T16 to the
+  command without the middleware feature; the design shows the real error body.
+- Test files formatted with `rustfmt --edition 2024` (the CI runs nightly `cargo fmt --check`,
+  not installed here); stable `cargo fmt --all --check` then reports no diff.
+- Re-runs: end-to-end with the custodian feature 47 passed (exit 0); `middleware_` 2 passed
+  (exit 0); `unknown_tenant` without the custodian feature 1 passed (exit 0);
+  `dependency_policy` 4 passed; `scripts/check-threat-model.sh` OK, 24 proven, 0 not tested.
+- Not applied: running the whole `vault_e2e` file with the middleware feature (every other test
+  sends plain JSON and is refused by design); the CI step runs the two `middleware_` tests.
+
