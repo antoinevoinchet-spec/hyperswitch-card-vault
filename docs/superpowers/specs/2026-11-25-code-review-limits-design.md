@@ -36,19 +36,20 @@ control (for example the custodian routes) in several rows.
   T45 HTTP method used as a metric label; T46 deep health check holds main-pool connections on a
   fixed key; T47 one delete rate limit for every tenant, spent before the caller check; T48
   application log holds caller references and card-derived hashes; T49 an add answered with an
-  earlier row without checking its lifetime (TTL) or its card.
-  Checked by: `grep -c '^| T4[1-9] |' docs/threat-model.md` prints 9, and each row's cited lines
+  earlier row without checking its lifetime (TTL) or its card; T50 a deleted card's duplicate-check
+  row stays after the delete.
+  Checked by: `grep -c -E '^\| T(4[1-9]|50) \|' docs/threat-model.md` prints 10, and each row's cited lines
   show the limit when opened.
 - D2. Additions to existing rows: T16 (a compressed body is inflated without a size bound before the
   signature check, read in the JOSE library's code); T19 (caller key outside the JWE envelope, in
-  clear without TLS); T29 (the kept hash row also serves someone who holds the master key); T37 (an
+  clear without TLS); T29 (refers to T50); T37 (an
   upsert by a caller with the `add` right only writes the audit row of an add; an add tells whether
   the stored name and card expiry date match); T38 (merchant keys are wrapped with empty associated data too,
   referring to T13).
   Checked by: `git diff main -- docs/threat-model.md` shows these five rows changed and no other
   existing row changed.
-- D3. The table stays valid. Checked by: `scripts/check-threat-model.sh` exits 0 and prints 49 rows
-  (24 proven, 0 not tested, 25 open).
+- D3. The table stays valid. Checked by: `scripts/check-threat-model.sh` exits 0 and prints 50 rows
+  (24 proven, 0 not tested, 26 open).
 - D4. No forbidden wording. Checked by: the checker passes (rule 12), and a search of the diff for
   compliance, certification, audit or production-readiness claims finds none.
 - D5. `README.md` lists the change under "Changes from the original". Checked by: the diff of

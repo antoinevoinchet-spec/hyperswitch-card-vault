@@ -14,12 +14,12 @@ Design: `docs/superpowers/specs/2026-11-25-code-review-limits-design.md`. Branch
 - After each edit: `scripts/check-threat-model.sh` exits 0.
 - One logical change per commit, `git status` before each.
 
-### Task 1: new open rows T41 to T49
+### Task 1: new open rows T41 to T50
 **Couvre:** D1, D3, D4
 
-Append the nine rows after T40, each with the lines listed in the private note and read again in
-the code. Run the checker (49 rows, 25 open) and `grep -c '^| T4[1-9] |' docs/threat-model.md`
-(9). Commit.
+Append the ten rows after T40, each with the lines listed in the private note and read again in
+the code. Run the checker (50 rows, 26 open) and
+`grep -c -E '^\| T(4[1-9]|50) \|' docs/threat-model.md` (10). Commit.
 
 ### Task 2: additions to T16, T19, T29, T37 and T38
 **Couvre:** D2, D3, D4
@@ -40,8 +40,8 @@ Add the entry under "Changes from the original". Run the checker. Commit.
 
 1. Compare the private note with the diff, line by line (D6).
 1b. Leak check on `git diff main` (design, plan, table, README): a case-insensitive search for the
-   checker's rule-12 words, the review report's folder name, the reviewed commit and any
-   word on disclosure dates finds nothing; a search for compliance, certification, audit or production-readiness
+   checker's rule-12 words, the review report's folder name, and the reviewed commit finds
+   nothing; a search for compliance, certification, audit or production-readiness
    claims finds none (D4); `git check-ignore -v` confirms the private note's folder is ignored.
 2. `security-review` on the branch.
 3. A fresh Opus reviewer, run locally, given the owner's request, the private note, the diff and
