@@ -3579,7 +3579,33 @@ impl Vault {
 /// Row counts of every table a data route writes: locker, hash, merchant, fingerprint, vault and
 /// entity.
 fn data_row_counts(db: &TestDb) -> [i64; 6] {
-    ["locker", "hash_table", "merchant", "fingerprint", "vault", "entity"].map(|table| db.count(table))
+    [
+        "locker",
+        "hash_table",
+        "merchant",
+        "fingerprint",
+        "vault",
+        "entity",
+    ]
+    .map(|table| db.count(table))
+}
+
+/// `text` with every run of 13 or more digits replaced, so that a failure never prints a card
+/// number.
+fn mask_card_numbers(text: &str) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    for c in text.chars().chain(std::iter::once(' ')) {
+        if c.is_ascii_digit() {
+            run.push(c);
+            continue;
+        }
+        out.push_str(if run.len() >= 13 { "<digits>" } else { &run });
+        run.clear();
+        out.push(c);
+    }
+    out.pop();
+    out
 }
 
 /// One request for each data route: v1 under `/data` and `/cards`, v2, and `/entity`.
@@ -3610,7 +3636,10 @@ fn every_data_request(reference: &str) -> Vec<(String, serde_json::Value)> {
     requests.push(("/api/v2/vault/retrieve".to_string(), v2_ref.clone()));
     requests.push(("/api/v2/vault/delete".to_string(), v2_ref));
     requests.push(("/api/v2/vault/fingerprint".to_string(), fingerprint));
-    requests.push(("/entity".to_string(), serde_json::json!({ "entity_id": MERCHANT })));
+    requests.push((
+        "/entity".to_string(),
+        serde_json::json!({ "entity_id": MERCHANT }),
+    ));
     requests
 }
 
@@ -3627,14 +3656,13 @@ async fn unknown_tenant_is_refused_on_every_data_route() {
     let before = data_row_counts(&db);
 
     let unknown = r#"{"code":"TE_03","message":"Tenant error: Invalid x-tenant-id","data":null}"#;
-    let missing =
-        r#"{"code":"TE_03","message":"Tenant error: x-tenant-id not found in headers","data":null}"#;
+    let missing = r#"{"code":"TE_03","message":"Tenant error: x-tenant-id not found in headers","data":null}"#;
     for tenant in [Some("no-such-tenant"), Some("PUBLIC"), Some(""), None] {
         for (path, body) in every_data_request(&reference) {
             let (status, response) = vault.post_as_tenant(&path, body, tenant).await;
             let expected = if tenant.is_some() { unknown } else { missing };
             assert_eq!(
-                (status, response.as_str()),
+                (status, mask_card_numbers(&response).as_str()),
                 (400, expected),
                 "{path} with tenant {tenant:?}"
             );
@@ -3649,7 +3677,11 @@ async fn unknown_tenant_is_refused_on_every_data_route() {
                 Some("no-such-tenant"),
             )
             .await;
-        assert_eq!((status, response.as_str()), (400, unknown), "custodian key");
+        assert_eq!(
+            (status, mask_card_numbers(&response).as_str()),
+            (400, unknown),
+            "custodian key"
+        );
     }
 
     assert_eq!(data_row_counts(&db), before, "no row written");
@@ -3675,7 +3707,11 @@ async fn data_routes_are_refused_before_unlock() {
         async move {
             for (path, body) in every_data_request("a-reference") {
                 let (status, response) = vault.post(&path, body).await;
-                assert_eq!((status, response.as_str()), (401, locked), "{path} {step}");
+                assert_eq!(
+                    (status, mask_card_numbers(&response).as_str()),
+                    (401, locked),
+                    "{path} {step}"
+                );
             }
         }
     };
@@ -3686,7 +3722,9 @@ async fn data_routes_are_refused_before_unlock() {
     assert_locked("with both keys, before decrypt").await;
     assert_eq!(data_row_counts(&db), [0; 6], "no row written while locked");
 
-    let (status, _) = vault.post("/custodian/decrypt", serde_json::json!({})).await;
+    let (status, _) = vault
+        .post("/custodian/decrypt", serde_json::json!({}))
+        .await;
     assert_eq!(status, 200, "decrypt");
     let reference = store_card(&vault).await;
     let (status, body) = vault.post("/data/retrieve", card_request(&reference)).await;
@@ -3716,7 +3754,11 @@ async fn generated_card_reference_is_a_uuid_v7() {
     };
     let start = now_ms();
     let mut references = Vec::new();
-    for (customer, number) in [(CUSTOMER, CARD_NUMBER), (CUSTOMER_2, CARD_2), (CUSTOMER, CARD_2)] {
+    for (customer, number) in [
+        (CUSTOMER, CARD_NUMBER),
+        (CUSTOMER_2, CARD_2),
+        (CUSTOMER, CARD_2),
+    ] {
         let response = store_card_as(&vault, MERCHANT, customer, number).await;
         references.push(
             response["payload"]["card_reference"]
@@ -3750,13 +3792,21 @@ async fn generated_card_reference_is_a_uuid_v7() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), references.len(), "each reference is new");
-    let stored: Vec<String> = db.locker_rows().into_iter().map(|row| row.locker_id).collect();
+    let stored: Vec<String> = db
+        .locker_rows()
+        .into_iter()
+        .map(|row| row.locker_id)
+        .collect();
     for reference in &references {
         assert!(stored.contains(reference), "stored under {reference}");
     }
 
-    let supplied = store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "caller-ref-1").await;
-    assert_eq!(supplied["payload"]["card_reference"], "caller-ref-1", "supplied reference kept");
+    let supplied =
+        store_card_with_ref(&vault, MERCHANT_2, CUSTOMER, card_data(), "caller-ref-1").await;
+    assert_eq!(
+        supplied["payload"]["card_reference"], "caller-ref-1",
+        "supplied reference kept"
+    );
 }
 
 /// T12: the fingerprint is keyed by the key the caller sends. The same card under two keys gets
@@ -3776,20 +3826,38 @@ async fn fingerprint_differs_for_two_caller_keys() {
         let vault = &vault;
         async move {
             let (status, body) = vault
-                .post("/data/fingerprint", serde_json::json!({ "data": data, "key": key }))
+                .post(
+                    "/data/fingerprint",
+                    serde_json::json!({ "data": data, "key": key }),
+                )
                 .await;
             assert_eq!(status, 200, "fingerprint");
             assert!(!body.contains(data), "no card number in the response");
             let body: serde_json::Value = serde_json::from_str(&body).expect("fingerprint JSON");
-            body["fingerprint_id"].as_str().expect("fingerprint_id").to_string()
+            body["fingerprint_id"]
+                .as_str()
+                .expect("fingerprint_id")
+                .to_string()
         }
     };
     let a = fingerprint(key_a.clone(), CARD_NUMBER).await;
     let b = fingerprint(key_b.clone(), CARD_NUMBER).await;
     assert_ne!(a, b, "two keys, two fingerprints");
-    assert_eq!(fingerprint(key_a.clone(), CARD_NUMBER).await, a, "same key, same fingerprint");
-    assert_eq!(fingerprint(key_b.clone(), CARD_NUMBER).await, b, "same key, same fingerprint");
-    assert_ne!(fingerprint(key_a.clone(), CARD_2).await, a, "another card, another fingerprint");
+    assert_eq!(
+        fingerprint(key_a.clone(), CARD_NUMBER).await,
+        a,
+        "same key, same fingerprint"
+    );
+    assert_eq!(
+        fingerprint(key_b.clone(), CARD_NUMBER).await,
+        b,
+        "same key, same fingerprint"
+    );
+    assert_ne!(
+        fingerprint(key_a.clone(), CARD_2).await,
+        a,
+        "another card, another fingerprint"
+    );
     assert_eq!(db.count("fingerprint"), 3, "one row per key and card");
 
     let (status, body) = vault
@@ -3878,12 +3946,9 @@ impl JweKeys {
             .expect("encrypter");
         let mut header = josekit::jwe::JweHeader::new();
         header.set_content_encryption("A256GCM");
-        let jwe = josekit::jwe::serialize_compact(
-            jws_body.to_string().as_bytes(),
-            &header,
-            &encrypter,
-        )
-        .expect("encrypt request");
+        let jwe =
+            josekit::jwe::serialize_compact(jws_body.to_string().as_bytes(), &header, &encrypter)
+                .expect("encrypt request");
         let parts: Vec<&str> = jwe.split('.').collect();
         assert_eq!(parts.len(), 5, "compact JWE");
         serde_json::json!({
@@ -3936,8 +4001,14 @@ async fn start_with_jwe(db: &TestDb, keys: &Keys, jwe: &JweKeys) -> Vault {
         db,
         &keys.master_key,
         &[
-            ("LOCKER__SECRETS__LOCKER_PRIVATE_KEY", jwe.locker_private.as_str()),
-            ("LOCKER__TENANT_SECRETS__PUBLIC__PUBLIC_KEY", jwe.tenant_public.as_str()),
+            (
+                "LOCKER__SECRETS__LOCKER_PRIVATE_KEY",
+                jwe.locker_private.as_str(),
+            ),
+            (
+                "LOCKER__TENANT_SECRETS__PUBLIC__PUBLIC_KEY",
+                jwe.tenant_public.as_str(),
+            ),
         ],
     )
     .await;
@@ -3989,10 +4060,17 @@ async fn middleware_requests_and_responses_are_jwe() {
         "card": { "card_number": CARD_NUMBER }
     });
     let (status, body) = vault
-        .post_jwe("/data/add", jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256), &[])
+        .post_jwe(
+            "/data/add",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "JWE add");
-    assert!(!body.contains("card_reference"), "add response not in clear");
+    assert!(
+        !body.contains("card_reference"),
+        "add response not in clear"
+    );
     let added = jwe.open_response(&body);
     let reference = added["payload"]["card_reference"]
         .as_str()
@@ -4005,17 +4083,27 @@ async fn middleware_requests_and_responses_are_jwe() {
         let (status, body) = vault
             .post_jwe(
                 "/data/retrieve",
-                jwe.request(&card_request(&reference), &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+                jwe.request(
+                    &card_request(&reference),
+                    &jwe.tenant_private,
+                    &josekit::jwe::RSA_OAEP_256,
+                ),
                 extra,
             )
             .await;
         assert_eq!(status, 200, "JWE retrieve {extra:?}");
-        assert!(!body.contains(CARD_NUMBER), "card number not in clear {extra:?}");
-        assert!(!body.contains("card_number"), "payload not in clear {extra:?}");
+        assert!(
+            !body.contains(CARD_NUMBER),
+            "card number not in clear {extra:?}"
+        );
+        assert!(
+            !body.contains("card_number"),
+            "payload not in clear {extra:?}"
+        );
         let opened = jwe.open_response(&body);
-        assert_eq!(
-            opened["payload"]["card"]["card_number"], CARD_NUMBER,
-            "decrypted card {extra:?}"
+        assert!(
+            opened["payload"]["card"]["card_number"].as_str() == Some(CARD_NUMBER),
+            "the decrypted response holds the stored card {extra:?}"
         );
     }
 }
@@ -4057,14 +4145,21 @@ async fn middleware_refuses_plain_and_forged_requests() {
     ];
     for (case, envelope) in cases {
         let (status, body) = vault.post_jwe("/data/add", envelope, &[]).await;
-        assert!((400..500).contains(&status), "{case}: refused, got {status}");
+        assert!(
+            (400..500).contains(&status),
+            "{case}: refused, got {status}"
+        );
         assert!(!body.contains("card_reference"), "{case}: nothing stored");
     }
     assert_eq!(data_row_counts(&db), [0; 6], "no row written");
 
     // The control case: the same add, correctly encrypted and signed, is accepted.
     let (status, _) = vault
-        .post_jwe("/data/add", jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256), &[])
+        .post_jwe(
+            "/data/add",
+            jwe.request(&add, &jwe.tenant_private, &josekit::jwe::RSA_OAEP_256),
+            &[],
+        )
         .await;
     assert_eq!(status, 200, "valid JWE add");
 }
