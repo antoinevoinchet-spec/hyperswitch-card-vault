@@ -127,6 +127,10 @@ The code in this repository is modified from the original [juspay/hyperswitch-ca
   - `docs/threat-model.md`: the six rows moved to proven, with their tests and what they do not cover; the commands to run them.
   - `docs/superpowers/specs/2026-11-25-untested-controls-design.md` and `docs/superpowers/plans/2026-11-25-untested-controls.md`: design and plan, with each deliberate breakage and its failing line.
   - `README.md`: this entry.
+- Open limits found in a review of the code (no change to the vault itself):
+  - `docs/threat-model.md`: new open rows T41 to T49 (provisioning route without a caller key, custodian routes without authentication, a merchant given a new key before its transfer, the key transfer route, metric labels, health checks, the delete rate limit, the application log, an add answered with an earlier row); additions to T16, T19, T29, T37 and T38.
+  - `docs/superpowers/specs/2026-11-25-code-review-limits-design.md` and `docs/superpowers/plans/2026-11-25-code-review-limits.md`: design and plan.
+  - `README.md`: this entry.
 
 ## Demo
 
